@@ -7,7 +7,9 @@ import {
   CircleEllipsis,
   Copy,
   Cpu,
+  Download,
   Edit3,
+  FileText,
   Folder,
   FolderPlus,
   Hash,
@@ -28,6 +30,7 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  Upload,
   User,
   WandSparkles,
   X
@@ -42,6 +45,14 @@ interface LocalImage {
   dataUrl: string;
 }
 
+interface ProjectFile {
+  id: string;
+  name: string;
+  type: "image" | "text";
+  mimeType: string;
+  content: string;
+}
+
 interface Message {
   role: "user" | "assistant";
   content: string;
@@ -54,6 +65,7 @@ interface SavedChat {
   title: string;
   messages: Message[];
   updatedAt: number;
+  pinned?: boolean;
 }
 
 interface Project {
@@ -62,6 +74,7 @@ interface Project {
   assistantName: string;
   prompt: string;
   images: LocalImage[];
+  files?: ProjectFile[];
   updatedAt: number;
 }
 
@@ -121,6 +134,29 @@ const THEME_OPTIONS = [
 
 const DEFAULT_PROMPT = "You are Aether, a helpful local AI assistant. Answer clearly, adapt to the user's task, and respond in the user's language.";
 const PROJECT_FALLBACK_PROMPT = "Use the active project's name, instructions, files, and chat history as context. If project files are attached, use them only when relevant.";
+const IMPORTABLE_TEXT_EXTENSIONS = [".txt", ".md", ".json", ".csv", ".ts", ".tsx"];
+const PROMPT_TEMPLATES = [
+  {
+    title: "Код-ревью",
+    prompt: "Act as a senior code reviewer. Find bugs, regressions, security risks, unclear logic, and missing tests. Start with findings ordered by severity, then give concise fixes. Respond in the user's language."
+  },
+  {
+    title: "Переводчик",
+    prompt: "Act as a precise translator. Preserve meaning, tone, formatting, names, code, and markdown. If the target language is not specified, ask one short clarifying question."
+  },
+  {
+    title: "Учитель",
+    prompt: "Act as a patient teacher. Explain step by step, use examples, check assumptions, and adapt difficulty to the user. Keep explanations practical and clear."
+  },
+  {
+    title: "Генератор постов",
+    prompt: "Act as a social media post generator. Create punchy posts with hooks, variants, platform-specific tone, and optional hashtags. Avoid generic filler."
+  },
+  {
+    title: "Помощник по проекту",
+    prompt: "Act as a project assistant. Use project instructions, files, and chat history to plan work, track decisions, summarize context, and propose next actions."
+  }
+];
 
 const createProject = (name = "New Project"): Project => ({
   id: crypto.randomUUID(),
@@ -128,6 +164,7 @@ const createProject = (name = "New Project"): Project => ({
   assistantName: "Aether",
   prompt: "",
   images: [],
+  files: [],
   updatedAt: Date.now()
 });
 
@@ -143,6 +180,31 @@ const readImageFile = (file: File) => new Promise<LocalImage>((resolve, reject) 
   reader.readAsDataURL(file);
 });
 
+const readProjectFile = (file: File) => new Promise<ProjectFile>((resolve, reject) => {
+  const reader = new FileReader();
+  const isImage = file.type.startsWith("image/");
+
+  reader.onload = () => resolve({
+    id: `${file.name}-${file.lastModified}-${crypto.randomUUID()}`,
+    name: file.name,
+    type: isImage ? "image" : "text",
+    mimeType: file.type || "text/plain",
+    content: String(reader.result)
+  });
+  reader.onerror = () => reject(reader.error);
+
+  if (isImage) {
+    reader.readAsDataURL(file);
+  } else {
+    reader.readAsText(file);
+  }
+});
+
+const isSupportedProjectFile = (file: File) => {
+  const lowerName = file.name.toLowerCase();
+  return file.type.startsWith("image/") || IMPORTABLE_TEXT_EXTENSIONS.some((extension) => lowerName.endsWith(extension));
+};
+
 const isEmptyDefaultProject = (project: Project) => (
   project.name === "Custom Project" &&
   !project.prompt &&
@@ -155,7 +217,8 @@ const loadProjects = () => {
     const projects = JSON.parse(localStorage.getItem("aether_projects") || "[]") as Array<Project & { characterName?: string }>;
     const normalizedProjects = projects.map((project) => ({
       ...project,
-      assistantName: project.assistantName || project.characterName || "Aether"
+      assistantName: project.assistantName || project.characterName || "Aether",
+      files: project.files || []
     })).filter((project) => !isEmptyDefaultProject(project));
     return normalizedProjects;
   } catch {
@@ -237,12 +300,39 @@ export const ChatPage = () => {
   const [useCustomModel, setUseCustomModel] = useState(() => localStorage.getItem("openrouter_use_custom_model") === "true");
   const [themeId, setThemeId] = useState(() => localStorage.getItem("aether_theme") || "aether");
   const [globalPrompt, setGlobalPrompt] = useState(() => localStorage.getItem("aether_global_prompt") || DEFAULT_PROMPT);
+  const [assistantMemory, setAssistantMemory] = useState(() => localStorage.getItem("aether_memory") || "");
+  const [chatSearch, setChatSearch] = useState("");
+  const [xTopic, setXTopic] = useState(() => localStorage.getItem("ai_x_topic") || "");
+  const [likedXPostIds, setLikedXPostIds] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("ai_x_liked_posts") || "[]") as string[];
+    } catch {
+      return [];
+    }
+  });
+  const [bookmarkedXPostIds, setBookmarkedXPostIds] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("ai_x_bookmarked_posts") || "[]") as string[];
+    } catch {
+      return [];
+    }
+  });
+  const [repostedXPostIds, setRepostedXPostIds] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("ai_x_reposted_posts") || "[]") as string[];
+    } catch {
+      return [];
+    }
+  });
+  const [xReplyDrafts, setXReplyDrafts] = useState<Record<string, string>>({});
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const skipNextChatSaveRef = useRef(false);
   const activeChatIdRef = useRef(activeChatId);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   activeChatIdRef.current = activeChatId;
 
@@ -252,8 +342,25 @@ export const ChatPage = () => {
   const projectChats = useMemo(
     () => savedChats
       .filter((chat) => activeProject ? chat.projectId === activeProject.id : !chat.projectId)
-      .sort((a, b) => b.updatedAt - a.updatedAt),
+      .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt),
     [activeProject, savedChats]
+  );
+  const filteredProjectChats = useMemo(() => {
+    const query = chatSearch.trim().toLowerCase();
+    if (!query) return projectChats;
+
+    return projectChats.filter((chat) => {
+      const projectName = projects.find((project) => project.id === chat.projectId)?.name || "No Project";
+      return (
+        chat.title.toLowerCase().includes(query) ||
+        projectName.toLowerCase().includes(query) ||
+        chat.messages.some((message) => message.content.toLowerCase().includes(query))
+      );
+    });
+  }, [chatSearch, projectChats, projects]);
+  const recentChats = useMemo(
+    () => [...savedChats].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 3),
+    [savedChats]
   );
   const sortedProjects = useMemo(
     () => [...projects].sort((a, b) => b.updatedAt - a.updatedAt),
@@ -381,14 +488,19 @@ export const ChatPage = () => {
     localStorage.setItem("openrouter_use_custom_model", String(useCustomModel));
     localStorage.setItem("aether_theme", themeId);
     localStorage.setItem("aether_global_prompt", globalPrompt);
-  }, [apiKey, selectedModel, customModel, useCustomModel, themeId, globalPrompt]);
+    localStorage.setItem("aether_memory", assistantMemory);
+  }, [apiKey, selectedModel, customModel, useCustomModel, themeId, globalPrompt, assistantMemory]);
 
   useEffect(() => {
     localStorage.setItem("ai_x_user_name", xUserName);
     localStorage.setItem("ai_x_user_handle", normalizeHandle(xUserHandle));
     localStorage.setItem("ai_x_followed_handles", JSON.stringify(followedHandles));
     localStorage.setItem("ai_x_premium", String(isXPremium));
-  }, [xUserName, xUserHandle, followedHandles, isXPremium]);
+    localStorage.setItem("ai_x_topic", xTopic);
+    localStorage.setItem("ai_x_liked_posts", JSON.stringify(likedXPostIds));
+    localStorage.setItem("ai_x_bookmarked_posts", JSON.stringify(bookmarkedXPostIds));
+    localStorage.setItem("ai_x_reposted_posts", JSON.stringify(repostedXPostIds));
+  }, [xUserName, xUserHandle, followedHandles, isXPremium, xTopic, likedXPostIds, bookmarkedXPostIds, repostedXPostIds]);
 
   const updateActiveProject = (patch: Partial<Project>) => {
     if (!activeProject) return;
@@ -399,38 +511,56 @@ export const ChatPage = () => {
   };
 
   const getSystemPrompt = () => {
+    const memoryBlock = assistantMemory.trim()
+      ? `Memory about the user and preferences:\n${assistantMemory.trim()}`
+      : "";
+
     if (!activeProject) {
-      return globalPrompt.trim() || DEFAULT_PROMPT;
+      return [globalPrompt.trim() || DEFAULT_PROMPT, memoryBlock].filter(Boolean).join("\n\n");
     }
 
     return [
       globalPrompt.trim() || DEFAULT_PROMPT,
+      memoryBlock,
       `Project: ${activeProject.name.trim() || "Custom Project"}`,
       `Assistant name in this project: ${activeProject.assistantName?.trim() || "Aether"}`,
       activeProject.prompt.trim() ? `Project instructions:\n${activeProject.prompt.trim()}` : PROJECT_FALLBACK_PROMPT,
-      activeProject.images.length ? "The user has attached local reference images to this project. Use them only when they are relevant to the answer." : ""
+      activeProject.images.length ? "The user has attached local reference images to this project. Use them only when they are relevant to the answer." : "",
+      activeProject.files?.filter((file) => file.type === "text").length
+        ? `Project text files:\n${activeProject.files
+          ?.filter((file) => file.type === "text")
+          .map((file) => `--- ${file.name} ---\n${file.content.slice(0, 12000)}`)
+          .join("\n\n")}`
+        : ""
     ].filter(Boolean).join("\n\n");
   };
 
-  const addImages = async (files: FileList | File[]) => {
+  const addProjectFiles = async (files: FileList | File[]) => {
     if (!activeProject) return;
 
-    const imageFiles = Array.from(files).filter((file) => file.type.startsWith("image/"));
-    if (!imageFiles.length) return;
+    const supportedFiles = Array.from(files).filter(isSupportedProjectFile);
+    if (!supportedFiles.length) return;
 
-    const loadedImages = await Promise.all(imageFiles.map(readImageFile));
-    updateActiveProject({ images: [...activeProject.images, ...loadedImages] });
+    const loadedFiles = await Promise.all(supportedFiles.map(readProjectFile));
+    const loadedImages = loadedFiles
+      .filter((file) => file.type === "image")
+      .map((file) => ({ id: file.id, name: file.name, dataUrl: file.content }));
+
+    updateActiveProject({
+      images: [...activeProject.images, ...loadedImages],
+      files: [...(activeProject.files || []), ...loadedFiles]
+    });
   };
 
   const handleProjectDrop = async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setIsDraggingImages(false);
-    await addImages(event.dataTransfer.files);
+    await addProjectFiles(event.dataTransfer.files);
   };
 
   const handleProjectFilePick = async (event: ChangeEvent<HTMLInputElement>) => {
     if (event.target.files) {
-      await addImages(event.target.files);
+      await addProjectFiles(event.target.files);
       event.target.value = "";
     }
   };
@@ -514,10 +644,108 @@ export const ChatPage = () => {
     if (activeChatId === chatId) resetChat();
   };
 
+  const renameSavedChat = (chat: SavedChat) => {
+    const nextTitle = window.prompt("Название чата", chat.title)?.trim();
+    if (!nextTitle) return;
+
+    setSavedChats((current) => current.map((item) => item.id === chat.id ? { ...item, title: nextTitle } : item));
+  };
+
+  const togglePinnedChat = (chatId: string) => {
+    setSavedChats((current) => current.map((chat) => chat.id === chatId ? { ...chat, pinned: !chat.pinned } : chat));
+  };
+
   const removeProjectImage = (imageId: string) => {
     if (!activeProject) return;
 
-    updateActiveProject({ images: activeProject.images.filter((image) => image.id !== imageId) });
+    updateActiveProject({
+      images: activeProject.images.filter((image) => image.id !== imageId),
+      files: (activeProject.files || []).filter((file) => file.id !== imageId)
+    });
+  };
+
+  const removeProjectFile = (fileId: string) => {
+    if (!activeProject) return;
+
+    updateActiveProject({
+      images: activeProject.images.filter((image) => image.id !== fileId),
+      files: (activeProject.files || []).filter((file) => file.id !== fileId)
+    });
+  };
+
+  const exportWorkspace = () => {
+    const payload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      projects,
+      savedChats,
+      settings: {
+        apiKey,
+        selectedModel,
+        customModel,
+        useCustomModel,
+        themeId,
+        globalPrompt,
+        assistantMemory
+      },
+      aiX: {
+        xUserName,
+        xUserHandle: normalizeHandle(xUserHandle),
+        xTopic,
+        followedHandles,
+        isXPremium,
+        likedXPostIds,
+        bookmarkedXPostIds,
+        repostedXPostIds
+      }
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const link = document.createElement("a");
+
+    link.href = URL.createObjectURL(blob);
+    link.download = `aether-workspace-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
+
+  const importWorkspace = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const payload = JSON.parse(await file.text());
+
+      setProjects(Array.isArray(payload.projects) ? payload.projects : []);
+      setSavedChats(Array.isArray(payload.savedChats) ? payload.savedChats : []);
+
+      if (payload.settings) {
+        setSelectedModel(payload.settings.selectedModel || selectedModel);
+        setApiKey(payload.settings.apiKey || "");
+        setCustomModel(payload.settings.customModel || "");
+        setUseCustomModel(Boolean(payload.settings.useCustomModel));
+        setThemeId(payload.settings.themeId || "aether");
+        setGlobalPrompt(payload.settings.globalPrompt || DEFAULT_PROMPT);
+        setAssistantMemory(payload.settings.assistantMemory || "");
+      }
+
+      if (payload.aiX) {
+        setXUserName(payload.aiX.xUserName || "");
+        setXUserHandle(payload.aiX.xUserHandle || "");
+        setXTopic(payload.aiX.xTopic || "");
+        setFollowedHandles(Array.isArray(payload.aiX.followedHandles) ? payload.aiX.followedHandles : []);
+        setIsXPremium(Boolean(payload.aiX.isXPremium));
+        setLikedXPostIds(Array.isArray(payload.aiX.likedXPostIds) ? payload.aiX.likedXPostIds : []);
+        setBookmarkedXPostIds(Array.isArray(payload.aiX.bookmarkedXPostIds) ? payload.aiX.bookmarkedXPostIds : []);
+        setRepostedXPostIds(Array.isArray(payload.aiX.repostedXPostIds) ? payload.aiX.repostedXPostIds : []);
+      }
+
+      resetChat();
+    } catch (error) {
+      console.error("Import workspace failed:", error);
+      window.alert("Не удалось импортировать workspace JSON.");
+    } finally {
+      event.target.value = "";
+    }
   };
 
   const generateXFeed = async () => {
@@ -554,7 +782,7 @@ export const ChatPage = () => {
             },
             {
               role: "user",
-              content: "Create a JSON object with a posts array containing 8 diverse fictional X posts in Russian. Make it feel like the real X/Twitter home feed. Each post must have author, handle, bio, followers, following, text, likes, commentsCount, reposts, views, and comments. comments must be 2-4 objects with author, text, likes. Invent realistic random engagement numbers."
+              content: `Create a JSON object with a posts array containing 8 diverse fictional X posts in Russian. Topic: ${xTopic.trim() || "mixed real-time social feed"}. Make it feel like the real X/Twitter home feed. Each post must have author, handle, bio, followers, following, text, likes, commentsCount, reposts, views, and comments. comments must be 2-4 objects with author, text, likes. Invent realistic random engagement numbers.`
             }
           ],
           response_format: { type: "json_object" }
@@ -641,6 +869,37 @@ export const ChatPage = () => {
         ? current.filter((item) => item !== handle)
         : [...current, handle]
     ));
+  };
+
+  const toggleXPostReaction = (postId: string, type: "like" | "repost" | "bookmark") => {
+    if (type === "like") {
+      setLikedXPostIds((current) => current.includes(postId) ? current.filter((id) => id !== postId) : [...current, postId]);
+      setXPosts((current) => current.map((post) => post.id === postId ? { ...post, likes: Math.max(0, post.likes + (likedXPostIds.includes(postId) ? -1 : 1)) } : post));
+    }
+
+    if (type === "repost") {
+      setRepostedXPostIds((current) => current.includes(postId) ? current.filter((id) => id !== postId) : [...current, postId]);
+      setXPosts((current) => current.map((post) => post.id === postId ? { ...post, reposts: Math.max(0, post.reposts + (repostedXPostIds.includes(postId) ? -1 : 1)) } : post));
+    }
+
+    if (type === "bookmark") {
+      setBookmarkedXPostIds((current) => current.includes(postId) ? current.filter((id) => id !== postId) : [...current, postId]);
+    }
+  };
+
+  const replyToXPost = (postId: string) => {
+    const reply = xReplyDrafts[postId]?.trim();
+    if (!reply) return;
+
+    setXPosts((current) => current.map((post) => post.id === postId ? {
+      ...post,
+      commentsCount: post.commentsCount + 1,
+      comments: [
+        { author: xUserName.trim() || "Local User", text: reply, likes: 0 },
+        ...post.comments
+      ]
+    } : post));
+    setXReplyDrafts((current) => ({ ...current, [postId]: "" }));
   };
 
   const sendXMessage = async () => {
@@ -785,6 +1044,9 @@ export const ChatPage = () => {
     targetProjectId: string | null,
     baseMessages: Message[]
   ) => {
+    const controller = new AbortController();
+
+    abortControllerRef.current = controller;
     setIsLoading(true);
     setLoadingChatId(targetChatId);
     let streamedMessages: Message[] = [...baseMessages];
@@ -801,6 +1063,7 @@ export const ChatPage = () => {
     try {
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
+        signal: controller.signal,
         headers: {
           "Authorization": `Bearer ${apiKey}`,
           "HTTP-Referer": "http://localhost:3000",
@@ -875,6 +1138,11 @@ export const ChatPage = () => {
         }
       }
     } catch (error: any) {
+      if (error.name === "AbortError") {
+        syncTargetChat(streamedMessages.filter((message) => message.content.trim() || message.role !== "assistant"));
+        return;
+      }
+
       console.error("Error calling OpenRouter:", error);
       const nextMessages = [...streamedMessages];
       const lastMessage = nextMessages[nextMessages.length - 1];
@@ -888,9 +1156,16 @@ export const ChatPage = () => {
 
       syncTargetChat([...nextMessages, { role: "assistant", content: errorMessage }]);
     } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+      }
       setIsLoading(false);
       setLoadingChatId((current) => current === targetChatId ? null : current);
     }
+  };
+
+  const stopGeneration = () => {
+    abortControllerRef.current?.abort();
   };
 
   const handleSend = async () => {
@@ -1012,7 +1287,7 @@ export const ChatPage = () => {
                     <Folder className="w-4 h-4 text-white/40 flex-shrink-0" />
                     <p className="text-sm text-white/80 truncate">{project.name || "Project"}</p>
                   </div>
-                  <p className="text-[10px] text-white/30 mt-1">{savedChats.filter((chat) => chat.projectId === project.id).length} chats · {project.images.length} images</p>
+                  <p className="text-[10px] text-white/30 mt-1">{savedChats.filter((chat) => chat.projectId === project.id).length} chats · {(project.files?.length || project.images.length)} files</p>
                 </button>
                 <div className="flex items-center gap-1">
                   <button onClick={() => { setActiveProjectId(project.id); setIsProjectOpen(true); }} className="p-2 rounded-full text-white/30 hover:text-white hover:bg-white/10 transition-colors" title="Edit project">
@@ -1028,27 +1303,40 @@ export const ChatPage = () => {
 
           <div className="flex items-center justify-between mt-6 mb-2 px-3">
             <p className="text-[10px] uppercase tracking-widest text-white/30 font-bold">{activeProject ? "Chats in Project" : "Chats"}</p>
-            <span className="text-[10px] text-white/30">{projectChats.length}</span>
+            <span className="text-[10px] text-white/30">{filteredProjectChats.length}</span>
+          </div>
+
+          <div className="mb-3 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2">
+            <Search className="h-4 w-4 text-white/35" />
+            <input value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Search chats" className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/25" />
           </div>
 
           <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2 pr-1">
-            {!projectChats.length && (
+            {!filteredProjectChats.length && (
               <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/40 leading-relaxed">
-                {activeProject ? "Чаты появятся здесь после первого сообщения в выбранном проекте." : "Обычные чаты без проекта появятся здесь после первого сообщения."}
+                {chatSearch.trim() ? "Ничего не найдено." : activeProject ? "Чаты появятся здесь после первого сообщения в выбранном проекте." : "Обычные чаты без проекта появятся здесь после первого сообщения."}
               </div>
             )}
-            {projectChats.map((chat) => (
+            {filteredProjectChats.map((chat) => (
               <div key={chat.id} className={`group flex items-start gap-2 rounded-2xl border p-3 transition-colors ${chat.id === activeChatId ? "border-white/20 bg-white/10" : "border-white/5 bg-white/5 hover:bg-white/10"}`}>
                 <button onClick={() => openSavedChat(chat)} className="min-w-0 flex-1 text-left">
                   <div className="flex items-center gap-2 min-w-0">
                     <MessageSquare className="w-4 h-4 text-white/40 flex-shrink-0" />
-                    <p className="text-sm text-white/80 truncate">{chat.title}</p>
+                    <p className="text-sm text-white/80 truncate">{chat.pinned ? "● " : ""}{chat.title}</p>
                   </div>
                   <p className="text-[10px] text-white/30 mt-1">{new Date(chat.updatedAt).toLocaleString()}</p>
                 </button>
-                <button onClick={() => deleteSavedChat(chat.id)} className="p-2 rounded-full text-white/30 hover:text-white hover:bg-white/10 transition-colors" title="Delete chat">
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                <div className="flex items-center gap-1">
+                  <button onClick={() => togglePinnedChat(chat.id)} className="p-2 rounded-full text-white/30 hover:text-white hover:bg-white/10 transition-colors" title={chat.pinned ? "Unpin chat" : "Pin chat"}>
+                    <Bookmark className="w-4 h-4" />
+                  </button>
+                  <button onClick={() => renameSavedChat(chat)} className="p-2 rounded-full text-white/30 hover:text-white hover:bg-white/10 transition-colors" title="Rename chat">
+                    <Edit3 className="w-4 h-4" />
+                  </button>
+                  <button onClick={() => deleteSavedChat(chat.id)} className="p-2 rounded-full text-white/30 hover:text-white hover:bg-white/10 transition-colors" title="Delete chat">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -1197,6 +1485,18 @@ export const ChatPage = () => {
                     </div>
                   )}
 
+                  {xScreen === "feed" && (
+                    <div className="border-b border-white/10 p-4">
+                      <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-4 py-2">
+                        <Hash className="h-4 w-4 text-[#1d9bf0]" />
+                        <input value={xTopic} onChange={(event) => setXTopic(event.target.value)} placeholder="Тема ленты: стартапы, игры, IT, крипта..." className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/35" />
+                        <button onClick={generateXFeed} disabled={isXLoading} className="rounded-full bg-[#1d9bf0] px-4 py-1.5 text-xs font-bold text-white disabled:opacity-50">
+                          {isXLoading ? "Генерация" : "Сгенерировать"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   {isXLoading && (
                     <div className="border-b border-white/10 p-10 text-center">
                       <Loader2 className="w-8 h-8 animate-spin mx-auto text-[var(--accent)]" />
@@ -1231,12 +1531,20 @@ export const ChatPage = () => {
                       </div>
                       <p className="mt-3 text-sm md:text-base leading-relaxed text-white/85 whitespace-pre-wrap break-words">{post.text}</p>
                       <div className="mt-4 flex items-center justify-between text-xs text-white/45">
-                        <span className="flex items-center gap-1"><MessageCircle className="w-4 h-4" />{formatXMetric(post.commentsCount)}</span>
-                        <span className="flex items-center gap-1"><Repeat2 className="w-4 h-4" />{formatXMetric(post.reposts)}</span>
-                        <span className="flex items-center gap-1"><Heart className="w-4 h-4" />{formatXMetric(post.likes)}</span>
+                        <button onClick={() => setXReplyDrafts((current) => ({ ...current, [post.id]: current[post.id] || "" }))} className="flex items-center gap-1 hover:text-[#1d9bf0]"><MessageCircle className="w-4 h-4" />{formatXMetric(post.commentsCount)}</button>
+                        <button onClick={() => toggleXPostReaction(post.id, "repost")} className={`flex items-center gap-1 hover:text-emerald-400 ${repostedXPostIds.includes(post.id) ? "text-emerald-400" : ""}`}><Repeat2 className="w-4 h-4" />{formatXMetric(post.reposts)}</button>
+                        <button onClick={() => toggleXPostReaction(post.id, "like")} className={`flex items-center gap-1 hover:text-rose-400 ${likedXPostIds.includes(post.id) ? "text-rose-400" : ""}`}><Heart className="w-4 h-4" />{formatXMetric(post.likes)}</button>
                         <span>{formatXMetric(post.views)}</span>
-                        <Bookmark className="h-4 w-4" />
+                        <button onClick={() => toggleXPostReaction(post.id, "bookmark")} className={bookmarkedXPostIds.includes(post.id) ? "text-[#1d9bf0]" : "hover:text-[#1d9bf0]"}>
+                          <Bookmark className="h-4 w-4" />
+                        </button>
                       </div>
+                      {xReplyDrafts[post.id] !== undefined && (
+                        <div className="mt-4 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 p-2">
+                          <input value={xReplyDrafts[post.id] || ""} onChange={(event) => setXReplyDrafts((current) => ({ ...current, [post.id]: event.target.value }))} placeholder="Ответить на пост" className="min-w-0 flex-1 bg-transparent px-2 text-sm text-white outline-none placeholder:text-white/35" />
+                          <button onClick={() => replyToXPost(post.id)} className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-black">Ответить</button>
+                        </div>
+                      )}
                       {!!post.comments.length && (
                         <div className="mt-4 space-y-2 border-t border-white/10 pt-4">
                           {post.comments.map((comment, index) => (
@@ -1393,18 +1701,49 @@ export const ChatPage = () => {
           ) : (
             <>
           {!messages.length && (
-            <div className="h-full min-h-[360px] flex flex-col items-center justify-center text-center">
+            <div className="h-full min-h-[520px] flex flex-col items-center justify-center text-center">
               <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">С чего начнем?</h1>
-              {activeProject ? (
-                <button onClick={() => setIsProjectOpen(true)} className="mt-8 inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 transition-colors text-sm text-white/80">
-                  <Folder className="w-4 h-4" />
-                  {activeProject.name || "Project"}
+              <div className="mt-8 flex flex-wrap justify-center gap-2">
+                {activeProject ? (
+                  <button onClick={() => setIsProjectOpen(true)} className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 transition-colors text-sm text-white/80">
+                    <Folder className="w-4 h-4" />
+                    {activeProject.name || "Project"}
+                  </button>
+                ) : (
+                  <button onClick={createNewProject} className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 transition-colors text-sm text-white/80">
+                    <FolderPlus className="w-4 h-4" />
+                    Create Project
+                  </button>
+                )}
+                <button onClick={() => setIsSettingsOpen(true)} className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 transition-colors text-sm text-white/80">
+                  <WandSparkles className="w-4 h-4" />
+                  Prompt Library
                 </button>
-              ) : (
-                <button onClick={createNewProject} className="mt-8 inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 transition-colors text-sm text-white/80">
-                  <FolderPlus className="w-4 h-4" />
-                  Create Project
+                <button onClick={generateXFeed} className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 transition-colors text-sm text-white/80">
+                  <Hash className="w-4 h-4" />
+                  AI X
                 </button>
+              </div>
+              <div className="mt-8 grid w-full max-w-3xl gap-3 md:grid-cols-3">
+                {PROMPT_TEMPLATES.slice(0, 3).map((template) => (
+                  <button key={template.title} onClick={() => setInput(template.prompt)} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-left hover:bg-white/10">
+                    <p className="font-semibold">{template.title}</p>
+                    <p className="mt-2 line-clamp-3 text-xs text-white/40">{template.prompt}</p>
+                  </button>
+                ))}
+              </div>
+              {!!recentChats.length && (
+                <div className="mt-6 w-full max-w-3xl text-left">
+                  <p className="mb-2 px-1 text-xs uppercase tracking-widest text-white/30">Recent chats</p>
+                  <div className="grid gap-2 md:grid-cols-3">
+                    {recentChats.map((chat) => (
+                      <button key={chat.id} onClick={() => openSavedChat(chat)} className="rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-left hover:bg-white/10">
+                        <p className="truncate text-sm text-white/80">{chat.title}</p>
+                        <p className="mt-1 text-[10px] text-white/30">{new Date(chat.updatedAt).toLocaleString()}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               )}
             </div>
           )}
@@ -1537,9 +1876,15 @@ export const ChatPage = () => {
                 rows={1}
               />
 
-              <button onClick={handleSend} disabled={!input.trim() || isLoading} className={`p-3 rounded-full transition-all flex items-center justify-center ${input.trim() && !isLoading ? "bg-white text-black scale-100 shadow-[0_0_20px_rgba(255,255,255,0.3)]" : "bg-white/10 text-white/20 scale-90 grayscale cursor-not-allowed"}`}>
-                <ArrowUp className="w-5 h-5" />
-              </button>
+              {isLoading && loadingChatId === activeChatId ? (
+                <button onClick={stopGeneration} className="p-3 rounded-full bg-white text-black transition-all flex items-center justify-center shadow-[0_0_20px_rgba(255,255,255,0.3)]" title="Stop generation">
+                  <span className="h-4 w-4 rounded-sm bg-black" />
+                </button>
+              ) : (
+                <button onClick={handleSend} disabled={!input.trim() || isLoading} className={`p-3 rounded-full transition-all flex items-center justify-center ${input.trim() && !isLoading ? "bg-white text-black scale-100 shadow-[0_0_20px_rgba(255,255,255,0.3)]" : "bg-white/10 text-white/20 scale-90 grayscale cursor-not-allowed"}`}>
+                  <ArrowUp className="w-5 h-5" />
+                </button>
+              )}
             </div>
           </div>
         </div>}
@@ -1632,6 +1977,13 @@ export const ChatPage = () => {
                   <label className="text-[10px] uppercase tracking-widest font-bold text-white/40 flex items-center gap-2">
                     <WandSparkles className="w-3 h-3" /> Global assistant prompt
                   </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {PROMPT_TEMPLATES.map((template) => (
+                      <button key={template.title} onClick={() => setGlobalPrompt(template.prompt)} className="rounded-xl border border-white/10 bg-white/5 p-3 text-left text-xs text-white/70 hover:bg-white/10">
+                        {template.title}
+                      </button>
+                    ))}
+                  </div>
                   <textarea
                     value={globalPrompt}
                     onChange={(event) => setGlobalPrompt(event.target.value)}
@@ -1640,6 +1992,35 @@ export const ChatPage = () => {
                     className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm focus:outline-none focus:border-[var(--accent)]/50 transition-colors resize-none custom-scrollbar"
                   />
                   <p className="text-[10px] text-white/20 leading-relaxed">Этот промпт применяется ко всем проектам и чатам. Инструкции конкретного проекта добавляются сверху как контекст проекта.</p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase tracking-widest font-bold text-white/40 flex items-center gap-2">
+                    <FileText className="w-3 h-3" /> Memory
+                  </label>
+                  <textarea
+                    value={assistantMemory}
+                    onChange={(event) => setAssistantMemory(event.target.value)}
+                    placeholder="Факты о пользователе, стиль ответа, предпочтения, постоянный контекст..."
+                    rows={5}
+                    className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm focus:outline-none focus:border-[var(--accent)]/50 transition-colors resize-none custom-scrollbar"
+                  />
+                  <p className="text-[10px] text-white/20 leading-relaxed">Memory подмешивается в системный промпт всех обычных чатов и проектов.</p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase tracking-widest font-bold text-white/40 flex items-center gap-2">
+                    <Download className="w-3 h-3" /> Workspace backup
+                  </label>
+                  <input ref={importInputRef} type="file" accept="application/json,.json" onChange={importWorkspace} className="hidden" />
+                  <div className="grid grid-cols-2 gap-2">
+                    <button onClick={exportWorkspace} className="flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-white/70 hover:bg-white/10">
+                      <Download className="h-4 w-4" /> Export workspace
+                    </button>
+                    <button onClick={() => importInputRef.current?.click()} className="flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-white/70 hover:bg-white/10">
+                      <Upload className="h-4 w-4" /> Import workspace
+                    </button>
+                  </div>
                 </div>
 
                 <div className="space-y-2">
@@ -1703,11 +2084,11 @@ export const ChatPage = () => {
                 </div>
 
                 <div onDragOver={(event) => { event.preventDefault(); setIsDraggingImages(true); }} onDragLeave={() => setIsDraggingImages(false)} onDrop={handleProjectDrop} className={`rounded-[2rem] border border-dashed p-5 transition-colors ${isDraggingImages ? "border-[var(--accent)] bg-white/10" : "border-white/10 bg-white/5"}`}>
-                  <input ref={imageInputRef} type="file" accept="image/*" multiple onChange={handleProjectFilePick} className="hidden" />
+                  <input ref={imageInputRef} type="file" accept="image/*,.txt,.md,.json,.csv,.ts,.tsx" multiple onChange={handleProjectFilePick} className="hidden" />
                   <button onClick={() => imageInputRef.current?.click()} className="w-full flex flex-col items-center justify-center gap-3 rounded-2xl py-8 text-white/60 hover:text-white transition-colors">
-                    <ImagePlus className="w-8 h-8 text-[var(--accent)]" />
+                    <FileText className="w-8 h-8 text-[var(--accent)]" />
                     <span className="text-sm font-medium">Drag & drop local project files here or click to choose</span>
-                    <span className="text-[10px] text-white/30">Files belong to this project folder. Chats inside the project can use them as references.</span>
+                    <span className="text-[10px] text-white/30">Images plus .txt, .md, .json, .csv, .ts, .tsx are stored locally and added to project context.</span>
                   </button>
                 </div>
 
@@ -1720,6 +2101,23 @@ export const ChatPage = () => {
                           <Trash2 className="w-4 h-4" />
                         </button>
                         <p className="p-2 text-[10px] text-white/40 truncate">{image.name}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {!!activeProject.files?.filter((file) => file.type === "text").length && (
+                  <div className="space-y-2">
+                    {activeProject.files.filter((file) => file.type === "text").map((file) => (
+                      <div key={file.id} className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 p-3">
+                        <FileText className="h-4 w-4 text-[var(--accent)]" />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm text-white/75">{file.name}</p>
+                          <p className="text-[10px] text-white/30">{formatXMetric(file.content.length)} chars</p>
+                        </div>
+                        <button onClick={() => removeProjectFile(file.id)} className="rounded-full p-2 text-white/40 hover:bg-white/10 hover:text-white">
+                          <Trash2 className="h-4 w-4" />
+                        </button>
                       </div>
                     ))}
                   </div>
