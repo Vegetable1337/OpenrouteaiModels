@@ -1,0 +1,1879 @@
+﻿import { AnimatePresence, motion } from "motion/react";
+import {
+  ArrowUp,
+  ArrowLeft,
+  Bell,
+  Bookmark,
+  CircleEllipsis,
+  Copy,
+  Cpu,
+  Edit3,
+  Folder,
+  FolderPlus,
+  Hash,
+  Heart,
+  ImagePlus,
+  Loader2,
+  MessageCircle,
+  MessageSquare,
+  MoreVertical,
+  Palette,
+  Plus,
+  RefreshCw,
+  Repeat2,
+  RotateCcw,
+  Rocket,
+  Search,
+  Settings,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  User,
+  WandSparkles,
+  X
+} from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { ChangeEvent, CSSProperties, DragEvent, useEffect, useMemo, useRef, useState } from "react";
+
+interface LocalImage {
+  id: string;
+  name: string;
+  dataUrl: string;
+}
+
+interface Message {
+  role: "user" | "assistant";
+  content: string;
+  images?: LocalImage[];
+}
+
+interface SavedChat {
+  id: string;
+  projectId?: string | null;
+  title: string;
+  messages: Message[];
+  updatedAt: number;
+}
+
+interface Project {
+  id: string;
+  name: string;
+  assistantName: string;
+  prompt: string;
+  images: LocalImage[];
+  updatedAt: number;
+}
+
+interface XComment {
+  author: string;
+  text: string;
+  likes: number;
+}
+
+interface XPost {
+  id: string;
+  author: string;
+  handle: string;
+  bio: string;
+  followers: number;
+  following: number;
+  text: string;
+  likes: number;
+  commentsCount: number;
+  reposts: number;
+  views: number;
+  comments: XComment[];
+}
+
+interface XMessage {
+  id: string;
+  role: "user" | "author";
+  text: string;
+}
+
+type XScreen = "feed" | "profile" | "messages";
+
+const formatXMetric = (value: number) => {
+  if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1))}M`;
+  if (value >= 1_000) return `${Number((value / 1_000).toFixed(value >= 10_000 ? 0 : 1))}K`;
+  return String(value);
+};
+
+const normalizeHandle = (value: string) => {
+  const clean = value.trim().replace(/^@/, "").replace(/[^\w]/g, "").slice(0, 18);
+  return clean ? `@${clean}` : "";
+};
+
+const MODEL_OPTIONS = [
+  { value: "google/gemini-2.0-flash-001", label: "Gemini 2.0 Flash (Fast & Clever)" },
+  { value: "anthropic/claude-3.5-sonnet", label: "Claude 3.5 Sonnet (Design Expert)" },
+  { value: "openai/gpt-4o-mini", label: "GPT-4o Mini (Efficient)" },
+  { value: "deepseek/deepseek-chat", label: "DeepSeek V3 (Economic)" },
+];
+
+const THEME_OPTIONS = [
+  { id: "aether", label: "Aether", appBg: "#000000", sidebarBg: "#0A0A0A", panelBg: "#121212", accent: "#A855F7", accentTo: "#3B82F6", userBubble: "#FFFFFF", userText: "#000000" },
+  { id: "graphite", label: "Graphite", appBg: "#09090B", sidebarBg: "#111113", panelBg: "#18181B", accent: "#A1A1AA", accentTo: "#52525B", userBubble: "#E4E4E7", userText: "#09090B" },
+  { id: "ember", label: "Ember", appBg: "#0E0705", sidebarBg: "#160D0A", panelBg: "#1F130F", accent: "#F97316", accentTo: "#EF4444", userBubble: "#FFF7ED", userText: "#1C0A03" },
+  { id: "aurora", label: "Aurora", appBg: "#020617", sidebarBg: "#07111F", panelBg: "#0B1627", accent: "#14B8A6", accentTo: "#8B5CF6", userBubble: "#CCFBF1", userText: "#042F2E" },
+];
+
+const DEFAULT_PROMPT = "You are Aether, a helpful local AI assistant. Answer clearly, adapt to the user's task, and respond in the user's language.";
+const PROJECT_FALLBACK_PROMPT = "Use the active project's name, instructions, files, and chat history as context. If project files are attached, use them only when relevant.";
+
+const createProject = (name = "New Project"): Project => ({
+  id: crypto.randomUUID(),
+  name,
+  assistantName: "Aether",
+  prompt: "",
+  images: [],
+  updatedAt: Date.now()
+});
+
+const readImageFile = (file: File) => new Promise<LocalImage>((resolve, reject) => {
+  const reader = new FileReader();
+
+  reader.onload = () => resolve({
+    id: `${file.name}-${file.lastModified}-${crypto.randomUUID()}`,
+    name: file.name,
+    dataUrl: String(reader.result)
+  });
+  reader.onerror = () => reject(reader.error);
+  reader.readAsDataURL(file);
+});
+
+const isEmptyDefaultProject = (project: Project) => (
+  project.name === "Custom Project" &&
+  !project.prompt &&
+  !project.images?.length &&
+  (!project.assistantName || project.assistantName === "Aether" || project.assistantName === "My Character")
+);
+
+const loadProjects = () => {
+  try {
+    const projects = JSON.parse(localStorage.getItem("aether_projects") || "[]") as Array<Project & { characterName?: string }>;
+    const normalizedProjects = projects.map((project) => ({
+      ...project,
+      assistantName: project.assistantName || project.characterName || "Aether"
+    })).filter((project) => !isEmptyDefaultProject(project));
+    return normalizedProjects;
+  } catch {
+    return [];
+  }
+};
+
+const loadSavedChats = () => {
+  try {
+    return JSON.parse(localStorage.getItem("aether_saved_chats") || "[]") as SavedChat[];
+  } catch {
+    return [];
+  }
+};
+
+const getChatTitle = (messages: Message[]) => {
+  const firstUserMessage = messages.find((message) => message.role === "user" && message.content.trim());
+  return firstUserMessage?.content.trim().slice(0, 42) || "New chat";
+};
+
+const fallbackXPosts: XPost[] = [
+  {
+    id: crypto.randomUUID(),
+    author: "Aether Lab",
+    handle: "@aether_lab",
+    bio: "Local AI studio building strange social simulations.",
+    followers: 12840,
+    following: 128,
+    text: "Лента не смогла распарсить JSON от модели. Попробуй обновить AI X еще раз или выбери другую модель.",
+    likes: 128,
+    commentsCount: 2,
+    reposts: 9,
+    views: 4200,
+    comments: [
+      { author: "Local User", text: "Нужен чистый JSON без Markdown.", likes: 12 },
+      { author: "Model Watch", text: "Некоторые модели любят добавлять пояснения вокруг JSON.", likes: 8 }
+    ]
+  }
+];
+
+export const ChatPage = () => {
+  const [input, setInput] = useState("");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [savedChats, setSavedChats] = useState<SavedChat[]>(() => loadSavedChats());
+  const [projects, setProjects] = useState<Project[]>(() => loadProjects());
+  const [activeProjectId, setActiveProjectId] = useState(() => localStorage.getItem("aether_active_project_id") || "");
+  const [activeChatId, setActiveChatId] = useState(() => localStorage.getItem("aether_active_chat_id") || crypto.randomUUID());
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadingChatId, setLoadingChatId] = useState<string | null>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isProjectOpen, setIsProjectOpen] = useState(false);
+  const [isDraggingImages, setIsDraggingImages] = useState(false);
+  const [activeView, setActiveView] = useState<"chat" | "x">("chat");
+  const [xPosts, setXPosts] = useState<XPost[]>([]);
+  const [isXLoading, setIsXLoading] = useState(false);
+  const [xError, setXError] = useState("");
+  const [xScreen, setXScreen] = useState<XScreen>("feed");
+  const [selectedXHandle, setSelectedXHandle] = useState("");
+  const [xMessageInput, setXMessageInput] = useState("");
+  const [xThreads, setXThreads] = useState<Record<string, XMessage[]>>({});
+  const [isXMessageLoading, setIsXMessageLoading] = useState(false);
+  const [xUserName, setXUserName] = useState(() => localStorage.getItem("ai_x_user_name") || "");
+  const [xUserHandle, setXUserHandle] = useState(() => localStorage.getItem("ai_x_user_handle") || "");
+  const [xDraft, setXDraft] = useState("");
+  const [xSearch, setXSearch] = useState("");
+  const [isXComposerOpen, setIsXComposerOpen] = useState(false);
+  const [followedHandles, setFollowedHandles] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("ai_x_followed_handles") || "[]") as string[];
+    } catch {
+      return [];
+    }
+  });
+  const [isXPremium, setIsXPremium] = useState(() => localStorage.getItem("ai_x_premium") === "true");
+
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("openrouter_api_key") || "");
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem("openrouter_model") || "google/gemini-2.0-flash-001");
+  const [customModel, setCustomModel] = useState(() => localStorage.getItem("openrouter_custom_model") || "");
+  const [useCustomModel, setUseCustomModel] = useState(() => localStorage.getItem("openrouter_use_custom_model") === "true");
+  const [themeId, setThemeId] = useState(() => localStorage.getItem("aether_theme") || "aether");
+  const [globalPrompt, setGlobalPrompt] = useState(() => localStorage.getItem("aether_global_prompt") || DEFAULT_PROMPT);
+
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const skipNextChatSaveRef = useRef(false);
+  const activeChatIdRef = useRef(activeChatId);
+
+  activeChatIdRef.current = activeChatId;
+
+  const activeProject = useMemo(() => {
+    return projects.find((project) => project.id === activeProjectId);
+  }, [activeProjectId, projects]);
+  const projectChats = useMemo(
+    () => savedChats
+      .filter((chat) => activeProject ? chat.projectId === activeProject.id : !chat.projectId)
+      .sort((a, b) => b.updatedAt - a.updatedAt),
+    [activeProject, savedChats]
+  );
+  const sortedProjects = useMemo(
+    () => [...projects].sort((a, b) => b.updatedAt - a.updatedAt),
+    [projects]
+  );
+  const selectedXPost = useMemo(() => {
+    return xPosts.find((post) => post.handle === selectedXHandle) || xPosts[0];
+  }, [selectedXHandle, xPosts]);
+  const selectedAuthorPosts = useMemo(() => {
+    if (!selectedXPost) return [];
+    return xPosts.filter((post) => post.handle === selectedXPost.handle);
+  }, [selectedXPost, xPosts]);
+  const filteredXPosts = useMemo(() => {
+    const query = xSearch.trim().toLowerCase();
+    if (!query) return xPosts;
+
+    return xPosts.filter((post) => (
+      post.author.toLowerCase().includes(query) ||
+      post.handle.toLowerCase().includes(query) ||
+      post.text.toLowerCase().includes(query)
+    ));
+  }, [xPosts, xSearch]);
+  const isXProfileReady = Boolean(xUserName.trim() && normalizeHandle(xUserHandle));
+  const effectiveModel = useCustomModel && customModel.trim() ? customModel.trim() : selectedModel;
+  const activeName = activeProject?.assistantName?.trim() || "Aether";
+  const isWaitingForFirstToken = isLoading && loadingChatId === activeChatId && messages[messages.length - 1]?.role !== "assistant";
+  const activeTheme = THEME_OPTIONS.find((theme) => theme.id === themeId) || THEME_OPTIONS[0];
+  const themeStyle = {
+    "--app-bg": activeTheme.appBg,
+    "--sidebar-bg": activeTheme.sidebarBg,
+    "--panel-bg": activeTheme.panelBg,
+    "--accent": activeTheme.accent,
+    "--accent-to": activeTheme.accentTo,
+    "--user-bubble": activeTheme.userBubble,
+    "--user-text": activeTheme.userText
+  } as CSSProperties;
+
+  const parseXPosts = (content: string): XPost[] => {
+    const jsonText = content.match(/```json\s*([\s\S]*?)```/)?.[1] || content.match(/\[[\s\S]*\]/)?.[0] || content;
+    const parsed = JSON.parse(jsonText) as Array<Omit<XPost, "id"> & { id?: string }>;
+
+    return parsed.slice(0, 8).map((post) => ({
+      id: post.id || crypto.randomUUID(),
+      author: String(post.author || "AI X User"),
+      handle: String(post.handle || "@ai_user"),
+      bio: String(post.bio || "AI-generated X profile."),
+      followers: Number(post.followers || 0),
+      following: Number(post.following || 0),
+      text: String(post.text || ""),
+      likes: Number(post.likes || 0),
+      commentsCount: Number(post.commentsCount || post.comments?.length || 0),
+      reposts: Number(post.reposts || 0),
+      views: Number(post.views || 0),
+      comments: Array.isArray(post.comments)
+        ? post.comments.slice(0, 4).map((comment) => ({
+          author: String(comment.author || "User"),
+          text: String(comment.text || ""),
+          likes: Number(comment.likes || 0)
+        }))
+        : []
+    }));
+  };
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, isLoading]);
+
+  useEffect(() => {
+    if (!inputRef.current) return;
+    inputRef.current.style.height = "44px";
+    inputRef.current.style.height = `${Math.min(inputRef.current.scrollHeight, 220)}px`;
+  }, [input]);
+
+  useEffect(() => {
+    localStorage.setItem("aether_saved_chats", JSON.stringify(savedChats));
+  }, [savedChats]);
+
+  useEffect(() => {
+    const projectIds = new Set(projects.map((project) => project.id));
+    setSavedChats((current) => current.map((chat) => (
+      chat.projectId && !projectIds.has(chat.projectId)
+        ? { ...chat, projectId: null }
+        : chat
+    )));
+  }, [projects]);
+
+  useEffect(() => {
+    localStorage.setItem("aether_projects", JSON.stringify(projects));
+  }, [projects]);
+
+  useEffect(() => {
+    localStorage.setItem("aether_active_chat_id", activeChatId);
+    localStorage.setItem("aether_active_project_id", activeProject?.id || "");
+  }, [activeChatId, activeProject?.id]);
+
+  useEffect(() => {
+    if (!messages.length) return;
+    if (skipNextChatSaveRef.current) {
+      skipNextChatSaveRef.current = false;
+      return;
+    }
+
+    setSavedChats((current) => {
+      const nextChat = {
+        id: activeChatId,
+        projectId: activeProject?.id || null,
+        title: getChatTitle(messages),
+        messages,
+        updatedAt: Date.now()
+      };
+      const existing = current.find((chat) => chat.id === activeChatId);
+      if (!existing) return [nextChat, ...current];
+
+      return current.map((chat) => chat.id === activeChatId ? nextChat : chat);
+    });
+    if (activeProject?.id) {
+      setProjects((current) => current.map((project) => project.id === activeProject.id ? { ...project, updatedAt: Date.now() } : project));
+    }
+  }, [activeChatId, activeProject?.id, messages]);
+
+  useEffect(() => {
+    localStorage.setItem("openrouter_api_key", apiKey);
+    localStorage.setItem("openrouter_model", selectedModel);
+    localStorage.setItem("openrouter_custom_model", customModel);
+    localStorage.setItem("openrouter_use_custom_model", String(useCustomModel));
+    localStorage.setItem("aether_theme", themeId);
+    localStorage.setItem("aether_global_prompt", globalPrompt);
+  }, [apiKey, selectedModel, customModel, useCustomModel, themeId, globalPrompt]);
+
+  useEffect(() => {
+    localStorage.setItem("ai_x_user_name", xUserName);
+    localStorage.setItem("ai_x_user_handle", normalizeHandle(xUserHandle));
+    localStorage.setItem("ai_x_followed_handles", JSON.stringify(followedHandles));
+    localStorage.setItem("ai_x_premium", String(isXPremium));
+  }, [xUserName, xUserHandle, followedHandles, isXPremium]);
+
+  const updateActiveProject = (patch: Partial<Project>) => {
+    if (!activeProject) return;
+
+    setProjects((current) => current.map((project) => (
+      project.id === activeProject.id ? { ...project, ...patch, updatedAt: Date.now() } : project
+    )));
+  };
+
+  const getSystemPrompt = () => {
+    if (!activeProject) {
+      return globalPrompt.trim() || DEFAULT_PROMPT;
+    }
+
+    return [
+      globalPrompt.trim() || DEFAULT_PROMPT,
+      `Project: ${activeProject.name.trim() || "Custom Project"}`,
+      `Assistant name in this project: ${activeProject.assistantName?.trim() || "Aether"}`,
+      activeProject.prompt.trim() ? `Project instructions:\n${activeProject.prompt.trim()}` : PROJECT_FALLBACK_PROMPT,
+      activeProject.images.length ? "The user has attached local reference images to this project. Use them only when they are relevant to the answer." : ""
+    ].filter(Boolean).join("\n\n");
+  };
+
+  const addImages = async (files: FileList | File[]) => {
+    if (!activeProject) return;
+
+    const imageFiles = Array.from(files).filter((file) => file.type.startsWith("image/"));
+    if (!imageFiles.length) return;
+
+    const loadedImages = await Promise.all(imageFiles.map(readImageFile));
+    updateActiveProject({ images: [...activeProject.images, ...loadedImages] });
+  };
+
+  const handleProjectDrop = async (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDraggingImages(false);
+    await addImages(event.dataTransfer.files);
+  };
+
+  const handleProjectFilePick = async (event: ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files) {
+      await addImages(event.target.files);
+      event.target.value = "";
+    }
+  };
+
+  const resetChat = () => {
+    const nextChatId = crypto.randomUUID();
+
+    setActiveView("chat");
+    setActiveProjectId("");
+    activeChatIdRef.current = nextChatId;
+    setActiveChatId(nextChatId);
+    setMessages([]);
+    setInput("");
+  };
+
+  const createNewProject = () => {
+    const nextChatId = crypto.randomUUID();
+
+    setActiveView("chat");
+    const project = createProject(`Project ${projects.length + 1}`);
+    setProjects((current) => [project, ...current]);
+    setActiveProjectId(project.id);
+    activeChatIdRef.current = nextChatId;
+    setActiveChatId(nextChatId);
+    setMessages([]);
+    setInput("");
+    setIsProjectOpen(true);
+  };
+
+  const selectProject = (projectId: string) => {
+    const nextChatId = crypto.randomUUID();
+
+    setActiveView("chat");
+    setActiveProjectId(projectId);
+    activeChatIdRef.current = nextChatId;
+    setActiveChatId(nextChatId);
+    setMessages([]);
+    setInput("");
+  };
+
+  const selectNoProject = () => {
+    const nextChatId = crypto.randomUUID();
+
+    setActiveView("chat");
+    setActiveProjectId("");
+    activeChatIdRef.current = nextChatId;
+    setActiveChatId(nextChatId);
+    setMessages([]);
+    setInput("");
+  };
+
+  const deleteProject = (projectId: string) => {
+    const nextProjects = projects.filter((project) => project.id !== projectId);
+
+    setProjects(nextProjects);
+    setSavedChats((current) => current.filter((chat) => chat.projectId !== projectId));
+
+    if (activeProject?.id === projectId) {
+      const nextChatId = crypto.randomUUID();
+
+      setActiveProjectId("");
+      activeChatIdRef.current = nextChatId;
+      setActiveChatId(nextChatId);
+      setMessages([]);
+      setInput("");
+    }
+  };
+
+  const openSavedChat = (chat: SavedChat) => {
+    setActiveView("chat");
+    skipNextChatSaveRef.current = true;
+    activeChatIdRef.current = chat.id;
+    setActiveProjectId(chat.projectId || "");
+    setActiveChatId(chat.id);
+    setMessages(chat.messages);
+    setInput("");
+  };
+
+  const deleteSavedChat = (chatId: string) => {
+    setSavedChats((current) => current.filter((chat) => chat.id !== chatId));
+    if (activeChatId === chatId) resetChat();
+  };
+
+  const removeProjectImage = (imageId: string) => {
+    if (!activeProject) return;
+
+    updateActiveProject({ images: activeProject.images.filter((image) => image.id !== imageId) });
+  };
+
+  const generateXFeed = async () => {
+    setActiveView("x");
+
+    if (!isXProfileReady) {
+      return;
+    }
+
+    if (!apiKey) {
+      setIsSettingsOpen(true);
+      return;
+    }
+
+    setXScreen("feed");
+    setIsXLoading(true);
+    setXError("");
+
+    try {
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "HTTP-Referer": "http://localhost:3000",
+          "X-Title": "Aether Local AI X",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: effectiveModel,
+          messages: [
+            {
+              role: "system",
+              content: "Generate fictional social feed posts for an AI-powered X/Twitter-like screen. Return only valid JSON, no markdown."
+            },
+            {
+              role: "user",
+              content: "Create a JSON object with a posts array containing 8 diverse fictional X posts in Russian. Make it feel like the real X/Twitter home feed. Each post must have author, handle, bio, followers, following, text, likes, commentsCount, reposts, views, and comments. comments must be 2-4 objects with author, text, likes. Invent realistic random engagement numbers."
+            }
+          ],
+          response_format: { type: "json_object" }
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok || data.error) {
+        throw new Error(data.error?.message || data.error?.metadata?.raw || "OpenRouter request failed");
+      }
+
+      const content = data.choices?.[0]?.message?.content || "[]";
+      const parsed = JSON.parse(content);
+      const posts = Array.isArray(parsed) ? parsed : parsed.posts;
+
+      if (!Array.isArray(posts)) {
+        setXPosts(parseXPosts(content));
+      } else {
+        setXPosts(parseXPosts(JSON.stringify(posts)));
+      }
+    } catch (error: any) {
+      console.error("Error generating AI X feed:", error);
+      setXError(error.message || "Не удалось сгенерировать ленту AI X.");
+      setXPosts(fallbackXPosts);
+    } finally {
+      setIsXLoading(false);
+    }
+  };
+
+  const exitX = () => {
+    setActiveView("chat");
+    setXScreen("feed");
+  };
+
+  const openXProfile = (post: XPost) => {
+    setSelectedXHandle(post.handle);
+    setXScreen("profile");
+  };
+
+  const openXMessages = (post: XPost) => {
+    setSelectedXHandle(post.handle);
+    setXScreen("messages");
+    setXThreads((current) => {
+      if (current[post.handle]?.length) return current;
+
+      return {
+        ...current,
+        [post.handle]: [{
+          id: crypto.randomUUID(),
+          role: "author",
+          text: `Привет, я ${post.author}. Пиши, если хочешь обсудить мой пост.`
+        }]
+      };
+    });
+  };
+
+  const publishXPost = () => {
+    if (!xDraft.trim() || !isXProfileReady) return;
+
+    const userPost: XPost = {
+      id: crypto.randomUUID(),
+      author: xUserName.trim(),
+      handle: normalizeHandle(xUserHandle),
+      bio: "Local AI X user.",
+      followers: followedHandles.length,
+      following: followedHandles.length,
+      text: xDraft.trim(),
+      likes: Math.floor(Math.random() * 900) + 12,
+      commentsCount: Math.floor(Math.random() * 80),
+      reposts: Math.floor(Math.random() * 120),
+      views: Math.floor(Math.random() * 50_000) + 500,
+      comments: []
+    };
+
+    setXPosts((current) => [userPost, ...current]);
+    setXDraft("");
+    setIsXComposerOpen(false);
+    setXScreen("feed");
+  };
+
+  const toggleFollow = (handle: string) => {
+    setFollowedHandles((current) => (
+      current.includes(handle)
+        ? current.filter((item) => item !== handle)
+        : [...current, handle]
+    ));
+  };
+
+  const sendXMessage = async () => {
+    if (!selectedXPost || !xMessageInput.trim() || isXMessageLoading) return;
+
+    if (!apiKey) {
+      setIsSettingsOpen(true);
+      return;
+    }
+
+    const userText = xMessageInput.trim();
+    const authorPostsForPrompt = selectedAuthorPosts
+      .slice(0, 5)
+      .map((post, index) => `Post ${index + 1}: ${post.text}\nEngagement: ${formatXMetric(post.likes)} likes, ${formatXMetric(post.reposts)} reposts, ${formatXMetric(post.views)} views.\nComments: ${post.comments.map((comment) => `${comment.author}: ${comment.text}`).join(" | ") || "none"}`)
+      .join("\n\n");
+    const previousThread = (xThreads[selectedXPost.handle] || [])
+      .slice(-8)
+      .map((message) => `${message.role === "user" ? "User" : selectedXPost.author}: ${message.text}`)
+      .join("\n");
+
+    setXMessageInput("");
+    setIsXMessageLoading(true);
+    setXError("");
+    setXThreads((current) => ({
+      ...current,
+      [selectedXPost.handle]: [
+        ...(current[selectedXPost.handle] || []),
+        { id: crypto.randomUUID(), role: "user", text: userText }
+      ]
+    }));
+
+    try {
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "HTTP-Referer": "http://localhost:3000",
+          "X-Title": "Aether Local AI X DM",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: effectiveModel,
+          messages: [
+            {
+              role: "system",
+              content: [
+                `You are ${selectedXPost.author} (${selectedXPost.handle}) from a fictional AI X social network.`,
+                `Bio: ${selectedXPost.bio}`,
+                `Followers: ${formatXMetric(selectedXPost.followers)}. Following: ${formatXMetric(selectedXPost.following)}.`,
+                "Stay in character. Answer like this exact person would answer in a private X DM.",
+                "Use the user's language. Keep replies natural, short to medium, and conversational.",
+                "Do not mention that you are an AI unless the character would naturally say it.",
+                authorPostsForPrompt ? `Recent posts and context:\n${authorPostsForPrompt}` : "",
+                previousThread ? `Previous DM thread:\n${previousThread}` : ""
+              ].filter(Boolean).join("\n\n")
+            },
+            {
+              role: "user",
+              content: userText
+            }
+          ]
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok || data.error) {
+        throw new Error(data.error?.message || data.error?.metadata?.raw || "OpenRouter request failed");
+      }
+
+      const reply = data.choices?.[0]?.message?.content || "Не смог ответить сейчас.";
+      setXThreads((current) => ({
+        ...current,
+        [selectedXPost.handle]: [
+          ...(current[selectedXPost.handle] || []),
+          { id: crypto.randomUUID(), role: "author", text: reply }
+        ]
+      }));
+    } catch (error: any) {
+      setXThreads((current) => ({
+        ...current,
+        [selectedXPost.handle]: [
+          ...(current[selectedXPost.handle] || []),
+          { id: crypto.randomUUID(), role: "author", text: "Сейчас не смог ответить через OpenRouter. Попробуй еще раз или смени модель в настройках." }
+        ]
+      }));
+      setXError(error.message || "Не удалось отправить сообщение.");
+    } finally {
+      setIsXMessageLoading(false);
+    }
+  };
+
+  const toOpenRouterMessage = (message: Message, includeImages = false) => {
+    if (message.role === "assistant" || !includeImages || !message.images?.length) {
+      return { role: message.role, content: message.content };
+    }
+
+    return {
+      role: message.role,
+      content: [
+        { type: "text", text: message.content },
+        ...message.images.map((image) => ({
+          type: "image_url",
+          image_url: { url: image.dataUrl }
+        }))
+      ]
+    };
+  };
+
+  const buildApiMessages = (history: Message[]) => {
+    const lastUserIndex = history.map((message) => message.role).lastIndexOf("user");
+
+    return [
+      { role: "system", content: getSystemPrompt() },
+      ...history.map((message, index) => toOpenRouterMessage(message, index === lastUserIndex))
+    ];
+  };
+
+  const saveChatById = (chatId: string, projectId: string | null, nextMessages: Message[]) => {
+    setSavedChats((current) => {
+      const nextChat = {
+        id: chatId,
+        projectId,
+        title: getChatTitle(nextMessages),
+        messages: nextMessages,
+        updatedAt: Date.now()
+      };
+      const existing = current.find((chat) => chat.id === chatId);
+
+      if (!existing) return [nextChat, ...current];
+
+      return current.map((chat) => chat.id === chatId ? nextChat : chat);
+    });
+
+    if (projectId) {
+      setProjects((current) => current.map((project) => project.id === projectId ? { ...project, updatedAt: Date.now() } : project));
+    }
+  };
+
+  const streamAssistantReply = async (
+    apiMessages: ReturnType<typeof buildApiMessages>,
+    targetChatId: string,
+    targetProjectId: string | null,
+    baseMessages: Message[]
+  ) => {
+    setIsLoading(true);
+    setLoadingChatId(targetChatId);
+    let streamedMessages: Message[] = [...baseMessages];
+
+    const syncTargetChat = (nextMessages: Message[]) => {
+      streamedMessages = nextMessages;
+      saveChatById(targetChatId, targetProjectId, nextMessages);
+
+      if (activeChatIdRef.current === targetChatId) {
+        setMessages(nextMessages);
+      }
+    };
+
+    try {
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "HTTP-Referer": "http://localhost:3000",
+          "X-Title": "Aether Local",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: effectiveModel,
+          messages: apiMessages,
+          stream: true,
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        try {
+          const errorData = JSON.parse(errorText);
+          throw new Error(errorData.error?.message || errorData.error?.metadata?.raw || errorText || "OpenRouter request failed");
+        } catch {
+          throw new Error(errorText || "OpenRouter request failed");
+        }
+      }
+
+      if (!response.body) {
+        throw new Error("Streaming is not available in this browser.");
+      }
+
+      syncTargetChat([...streamedMessages, { role: "assistant", content: "" }]);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (!trimmedLine.startsWith("data:")) continue;
+
+          const payload = trimmedLine.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+
+          const data = JSON.parse(payload);
+          if (data.error) {
+            throw new Error(data.error?.message || data.error?.metadata?.raw || "Provider returned error");
+          }
+
+          const delta = data.choices?.[0]?.delta?.content;
+          const nextText = Array.isArray(delta)
+            ? delta.map((part) => part?.text || "").join("")
+            : delta || "";
+
+          if (nextText) {
+            const nextMessages = [...streamedMessages];
+            const lastMessage = nextMessages[nextMessages.length - 1];
+
+            if (lastMessage?.role === "assistant") {
+              nextMessages[nextMessages.length - 1] = {
+                ...lastMessage,
+                content: `${lastMessage.content}${nextText}`
+              };
+            }
+
+            syncTargetChat(nextMessages);
+          }
+        }
+      }
+    } catch (error: any) {
+      console.error("Error calling OpenRouter:", error);
+      const nextMessages = [...streamedMessages];
+      const lastMessage = nextMessages[nextMessages.length - 1];
+      const errorMessage = `Ошибка: ${error.message || "Не удалось подключиться к OpenRouter. Проверь ключ, модель и поддержку изображений у выбранной модели."}`;
+
+      if (lastMessage?.role === "assistant" && !lastMessage.content) {
+        nextMessages[nextMessages.length - 1] = { ...lastMessage, content: errorMessage };
+        syncTargetChat(nextMessages);
+        return;
+      }
+
+      syncTargetChat([...nextMessages, { role: "assistant", content: errorMessage }]);
+    } finally {
+      setIsLoading(false);
+      setLoadingChatId((current) => current === targetChatId ? null : current);
+    }
+  };
+
+  const handleSend = async () => {
+    if (!input.trim() || isLoading) return;
+
+    if (!apiKey) {
+      setIsSettingsOpen(true);
+      return;
+    }
+
+    const userMessage: Message = {
+      role: "user",
+      content: input,
+      images: activeProject?.images.length ? activeProject.images : undefined
+    };
+    const currentMessages = [...messages, userMessage];
+    const targetChatId = activeChatId;
+    const targetProjectId = activeProject?.id || null;
+
+    setMessages(currentMessages);
+    setInput("");
+    await streamAssistantReply(buildApiMessages(currentMessages), targetChatId, targetProjectId, currentMessages);
+  };
+
+  const copyMessageText = async (text: string) => {
+    if (!text.trim()) return;
+
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed";
+      textArea.style.opacity = "0";
+      document.body.appendChild(textArea);
+      textArea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textArea);
+    }
+  };
+
+  const editUserMessage = (index: number) => {
+    const message = messages[index];
+    if (!message || message.role !== "user" || isLoading) return;
+
+    setInput(message.content);
+    setMessages(messages.slice(0, index));
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
+  const regenerateAssistantMessage = async (index: number) => {
+    if (isLoading) return;
+
+    if (!apiKey) {
+      setIsSettingsOpen(true);
+      return;
+    }
+
+    const message = messages[index];
+    if (!message || message.role !== "assistant") return;
+
+    const history = messages.slice(0, index);
+    if (!history.some((item) => item.role === "user")) return;
+    const targetChatId = activeChatId;
+    const targetProjectId = activeProject?.id || null;
+
+    setMessages(history);
+    await streamAssistantReply(buildApiMessages(history), targetChatId, targetProjectId, history);
+  };
+
+  return (
+    <div style={themeStyle} className="flex h-screen bg-[var(--app-bg)] text-white font-sans overflow-hidden selection:bg-[var(--accent)]/30 selection:text-white">
+      {activeView === "chat" && <aside className="hidden md:flex w-80 flex-col border-r border-white/5 bg-[var(--sidebar-bg)] p-4">
+        <div className="flex items-center gap-3 mb-8 px-2">
+          <div className="w-8 h-8 rounded-lg bg-linear-to-tr from-[var(--accent)] to-[var(--accent-to)] flex items-center justify-center">
+            <Sparkles className="w-5 h-5 text-white" />
+          </div>
+          <span className="font-semibold text-lg tracking-tight">Aether Chat</span>
+        </div>
+
+        <button onClick={resetChat} className="flex items-center gap-3 w-full p-3 rounded-2xl bg-white/5 hover:bg-white/10 transition-all border border-white/10 mb-3 group">
+          <Plus className="w-5 h-5 text-white/60 group-hover:text-white" />
+          <span className="text-sm font-medium">New Chat</span>
+        </button>
+
+        <button onClick={createNewProject} className="flex items-center gap-3 w-full p-3 rounded-2xl bg-white/5 hover:bg-white/10 transition-all border border-white/10 group">
+          <FolderPlus className="w-5 h-5 text-white/60 group-hover:text-white" />
+          <span className="text-sm font-medium">New Project</span>
+        </button>
+
+        <button onClick={generateXFeed} className={`flex items-center gap-3 w-full p-3 rounded-2xl transition-all border border-white/10 mt-3 group ${activeView === "x" ? "bg-white/10" : "bg-white/5 hover:bg-white/10"}`}>
+          <Hash className="w-5 h-5 text-white/60 group-hover:text-white" />
+          <span className="text-sm font-medium">AI X</span>
+        </button>
+
+        <div className="flex-1 mt-8 min-h-0 flex flex-col">
+          <div className="flex items-center justify-between mb-2 px-3">
+            <p className="text-[10px] uppercase tracking-widest text-white/30 font-bold">Projects</p>
+            <button onClick={createNewProject} className="p-1.5 rounded-full text-white/40 hover:text-white hover:bg-white/10 transition-colors" title="New project">
+              <FolderPlus className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="max-h-[32%] overflow-y-auto custom-scrollbar space-y-2 pr-1">
+            <div className={`group flex items-start gap-2 rounded-2xl border p-3 transition-colors ${!activeProject ? "border-white/20 bg-white/10" : "border-white/5 bg-white/5 hover:bg-white/10"}`}>
+              <button onClick={selectNoProject} className="min-w-0 flex-1 text-left">
+                <div className="flex items-center gap-2 min-w-0">
+                  <MessageSquare className="w-4 h-4 text-white/40 flex-shrink-0" />
+                  <p className="text-sm text-white/80 truncate">No Project</p>
+                </div>
+                <p className="text-[10px] text-white/30 mt-1">{savedChats.filter((chat) => !chat.projectId).length} chats</p>
+              </button>
+            </div>
+
+            {sortedProjects.map((project) => (
+              <div key={project.id} className={`group flex items-start gap-2 rounded-2xl border p-3 transition-colors ${project.id === activeProject?.id ? "border-white/20 bg-white/10" : "border-white/5 bg-white/5 hover:bg-white/10"}`}>
+                <button onClick={() => selectProject(project.id)} className="min-w-0 flex-1 text-left">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Folder className="w-4 h-4 text-white/40 flex-shrink-0" />
+                    <p className="text-sm text-white/80 truncate">{project.name || "Project"}</p>
+                  </div>
+                  <p className="text-[10px] text-white/30 mt-1">{savedChats.filter((chat) => chat.projectId === project.id).length} chats · {project.images.length} images</p>
+                </button>
+                <div className="flex items-center gap-1">
+                  <button onClick={() => { setActiveProjectId(project.id); setIsProjectOpen(true); }} className="p-2 rounded-full text-white/30 hover:text-white hover:bg-white/10 transition-colors" title="Edit project">
+                    <Settings className="w-4 h-4" />
+                  </button>
+                  <button onClick={() => deleteProject(project.id)} className="p-2 rounded-full text-white/30 hover:text-white hover:bg-white/10 transition-colors" title="Delete project">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex items-center justify-between mt-6 mb-2 px-3">
+            <p className="text-[10px] uppercase tracking-widest text-white/30 font-bold">{activeProject ? "Chats in Project" : "Chats"}</p>
+            <span className="text-[10px] text-white/30">{projectChats.length}</span>
+          </div>
+
+          <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2 pr-1">
+            {!projectChats.length && (
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/40 leading-relaxed">
+                {activeProject ? "Чаты появятся здесь после первого сообщения в выбранном проекте." : "Обычные чаты без проекта появятся здесь после первого сообщения."}
+              </div>
+            )}
+            {projectChats.map((chat) => (
+              <div key={chat.id} className={`group flex items-start gap-2 rounded-2xl border p-3 transition-colors ${chat.id === activeChatId ? "border-white/20 bg-white/10" : "border-white/5 bg-white/5 hover:bg-white/10"}`}>
+                <button onClick={() => openSavedChat(chat)} className="min-w-0 flex-1 text-left">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <MessageSquare className="w-4 h-4 text-white/40 flex-shrink-0" />
+                    <p className="text-sm text-white/80 truncate">{chat.title}</p>
+                  </div>
+                  <p className="text-[10px] text-white/30 mt-1">{new Date(chat.updatedAt).toLocaleString()}</p>
+                </button>
+                <button onClick={() => deleteSavedChat(chat.id)} className="p-2 rounded-full text-white/30 hover:text-white hover:bg-white/10 transition-colors" title="Delete chat">
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-auto pt-4 border-t border-white/5 space-y-1">
+          <button onClick={() => setIsSettingsOpen(true)} className="flex items-center gap-3 w-full p-3 rounded-xl hover:bg-white/5 transition-colors group">
+            <Settings className="w-4 h-4 text-white/40 group-hover:text-white" />
+            <span className="text-sm text-white/60 group-hover:text-white">Settings</span>
+          </button>
+          <div className="flex items-center gap-3 w-full p-3 mt-2">
+            <div className="w-8 h-8 rounded-full bg-linear-to-br from-gray-700 to-gray-900 border border-white/10" />
+            <div className="flex-1">
+              <p className="text-xs font-medium">Local User</p>
+              <p className="text-[10px] text-white/30 tracking-tight">Developer Mode</p>
+            </div>
+            <MoreVertical className="w-4 h-4 text-white/20" />
+          </div>
+        </div>
+      </aside>}
+
+      <main className="flex-1 flex flex-col relative bg-[var(--app-bg)] min-w-0">
+        {activeView === "chat" && <header className="h-16 flex items-center justify-between px-6 border-b border-white/5 backdrop-blur-md bg-[var(--app-bg)]/50 sticky top-0 z-10">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-sm font-medium text-white/80 truncate">{activeView === "x" ? "AI X" : activeProject?.name || "No Project"}</span>
+            <div className="px-1.5 py-0.5 rounded-md bg-white/5 border border-white/10 text-[10px] text-[var(--accent)] font-bold uppercase tracking-wider max-w-[180px] truncate">
+              {effectiveModel.split("/").pop()}
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            {!apiKey && <span className="text-[10px] text-amber-400 animate-pulse font-bold uppercase tracking-wider">No API Key</span>}
+            <button onClick={() => setIsSettingsOpen(true)} className="p-2 text-white/40 hover:text-white transition-colors">
+              <Settings className="w-5 h-5" />
+            </button>
+          </div>
+        </header>}
+
+        <div className={`flex-1 ${activeView === "x" ? "p-0" : "p-4 md:p-8 max-w-4xl mx-auto"} space-y-8 w-full ${activeView === "x" || messages.length ? "overflow-y-auto custom-scrollbar" : "overflow-hidden"}`}>
+          {activeView === "x" ? (
+            <div className="mx-auto w-full max-w-[1260px]">
+              {!isXProfileReady && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm">
+                  <div className="w-full max-w-md rounded-[2rem] border border-white/10 bg-[#111] p-6 shadow-2xl">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-3xl font-bold">X</p>
+                        <h2 className="mt-4 text-2xl font-bold">Создай профиль AI X</h2>
+                        <p className="mt-2 text-sm text-white/45">Выбери ник и handle. Это хранится только локально.</p>
+                      </div>
+                      <button onClick={exitX} className="rounded-full p-2 text-white/50 hover:bg-white/10 hover:text-white">
+                        <X className="h-5 w-5" />
+                      </button>
+                    </div>
+                    <div className="mt-6 space-y-3">
+                      <input value={xUserName} onChange={(event) => setXUserName(event.target.value)} placeholder="Ник, например Marat Akhmetov" className="w-full rounded-2xl border border-white/10 bg-white/5 p-4 text-sm outline-none focus:border-[#1d9bf0]" />
+                      <input value={xUserHandle} onChange={(event) => setXUserHandle(event.target.value)} onBlur={() => setXUserHandle(normalizeHandle(xUserHandle))} placeholder="@username" className="w-full rounded-2xl border border-white/10 bg-white/5 p-4 text-sm outline-none focus:border-[#1d9bf0]" />
+                      <button disabled={!xUserName.trim() || !normalizeHandle(xUserHandle)} onClick={() => setXUserHandle(normalizeHandle(xUserHandle))} className="w-full rounded-full bg-white py-3 font-bold text-black disabled:opacity-40">Войти в AI X</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[275px_minmax(0,600px)_380px]">
+                <nav className="hidden lg:flex flex-col border-r border-white/10 px-6 py-3">
+                  <button onClick={exitX} className="mb-3 flex h-12 w-12 items-center justify-center rounded-full text-3xl text-white hover:bg-white/10" title="Back to Aether">
+                    X
+                  </button>
+                  {[
+                    { label: "Главная", icon: Hash, screen: "feed" as XScreen },
+                    { label: "Обзор", icon: Search, screen: "feed" as XScreen },
+                    { label: "Уведомления", icon: Bell, screen: "feed" as XScreen },
+                    { label: "Читать", icon: User, screen: "profile" as XScreen },
+                    { label: "Чат", icon: MessageCircle, screen: "messages" as XScreen },
+                    { label: "Grok", icon: Sparkles, screen: "feed" as XScreen },
+                    { label: "Закладки", icon: Bookmark, screen: "feed" as XScreen },
+                    { label: "Творческая студия", icon: Rocket, screen: "feed" as XScreen },
+                    { label: "Premium", icon: X, screen: "feed" as XScreen },
+                    { label: "Профиль", icon: User, screen: "profile" as XScreen },
+                    { label: "Ещё", icon: CircleEllipsis, screen: "feed" as XScreen },
+                  ].map((item) => {
+                    const Icon = item.icon;
+                    const isDisabled = (item.screen === "profile" || item.screen === "messages") && !selectedXPost;
+                    const isActive = xScreen === item.screen && ["Главная", "Чат", "Профиль"].includes(item.label);
+
+                    return (
+                      <button key={item.label} disabled={isDisabled} onClick={() => setXScreen(item.screen)} className={`flex items-center gap-5 rounded-full px-3 py-3 text-xl disabled:opacity-40 ${isActive ? "font-bold text-white" : "text-white/80 hover:bg-white/10"}`}>
+                        <Icon className="h-6 w-6" />
+                        <span>{item.label}</span>
+                      </button>
+                    );
+                  })}
+                  <button onClick={() => setIsXComposerOpen(true)} className="mt-4 rounded-full bg-white px-5 py-4 font-bold text-black hover:bg-white/90">
+                    Опубликовать пост
+                  </button>
+                  <button onClick={exitX} className="mt-auto flex items-center gap-3 rounded-full p-3 text-left hover:bg-white/10">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#ff4b25] font-semibold">{(xUserName.trim()[0] || "U").toUpperCase()}</div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold">{xUserName.trim() || "AI X User"}</p>
+                      <p className="truncate text-sm text-white/40">{normalizeHandle(xUserHandle) || "@user"}</p>
+                    </div>
+                    <MoreVertical className="h-4 w-4 text-white/50" />
+                  </button>
+                </nav>
+
+                <section className="min-w-0 border-r border-white/10">
+                  <div className="sticky top-0 z-10 border-b border-white/10 bg-[var(--app-bg)]/80 backdrop-blur-md">
+                    <div className="flex items-center justify-between px-4 py-3 lg:hidden">
+                      <div className="flex items-center gap-3">
+                        <button onClick={exitX} className="rounded-full p-2 text-white/60 hover:bg-white/10 hover:text-white lg:hidden">
+                          <ArrowLeft className="w-5 h-5" />
+                        </button>
+                        <div>
+                        <h1 className="text-xl font-bold">{xScreen === "profile" ? selectedXPost?.author || "Profile" : xScreen === "messages" ? "Messages" : "Home"}</h1>
+                        <p className="text-xs text-white/35">{xScreen === "feed" ? "AI X generated by OpenRouter" : selectedXPost?.handle}</p>
+                        </div>
+                      </div>
+                      <button onClick={generateXFeed} disabled={isXLoading} className="rounded-full p-2 text-white/50 hover:bg-white/10 hover:text-white disabled:opacity-50">
+                        {isXLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <RefreshCw className="w-5 h-5" />}
+                      </button>
+                    </div>
+                    {xScreen === "feed" && (
+                      <div className="hidden grid-cols-2 text-center font-semibold text-white/70 lg:grid">
+                        <button className="relative py-4 hover:bg-white/[0.03]">
+                          Для вас
+                          <span className="absolute bottom-0 left-1/2 h-1 w-14 -translate-x-1/2 rounded-full bg-[#1d9bf0]" />
+                        </button>
+                        <button className="py-4 hover:bg-white/[0.03]">Читаю</button>
+                      </div>
+                    )}
+                  </div>
+
+                  {xScreen === "feed" && (
+                    <div className="hidden border-b border-white/10 p-4 lg:flex gap-3">
+                      <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-[#ff4b25] font-semibold">{(xUserName.trim()[0] || "U").toUpperCase()}</div>
+                      <div className="min-w-0 flex-1">
+                        <textarea value={xDraft} onChange={(event) => setXDraft(event.target.value)} rows={2} placeholder="Что происходит?" className="w-full resize-none bg-transparent py-2 text-xl text-white outline-none placeholder:text-white/40" />
+                        <div className="mt-6 flex items-center justify-between">
+                          <div className="flex gap-4 text-[#1d9bf0]">
+                            <ImagePlus className="h-5 w-5" />
+                            <Hash className="h-5 w-5" />
+                            <Sparkles className="h-5 w-5" />
+                            <CircleEllipsis className="h-5 w-5" />
+                          </div>
+                          <button onClick={publishXPost} disabled={!xDraft.trim()} className="rounded-full bg-white px-5 py-2 text-sm font-bold text-black disabled:opacity-50">Опубликовать пост</button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {isXLoading && (
+                    <div className="border-b border-white/10 p-10 text-center">
+                      <Loader2 className="w-8 h-8 animate-spin mx-auto text-[var(--accent)]" />
+                      <p className="mt-4 text-sm text-white/60">AI X загружает свежую ленту...</p>
+                    </div>
+                  )}
+
+                  {!!xError && (
+                    <div className="border-b border-red-500/20 bg-red-500/10 p-4 text-sm text-red-200">
+                      {xError}
+                    </div>
+                  )}
+
+                  {!isXLoading && !xPosts.length && (
+                    <button onClick={generateXFeed} className="w-full border-b border-white/10 p-10 text-center hover:bg-white/5 transition-colors">
+                      <Hash className="w-8 h-8 mx-auto text-[var(--accent)]" />
+                      <p className="mt-4 font-medium">Войти в AI X</p>
+                      <p className="mt-2 text-sm text-white/40">Лента появится после генерации через OpenRouter.</p>
+                    </button>
+                  )}
+
+                  {xScreen === "feed" && filteredXPosts.map((post) => (
+                    <article key={post.id} className="border-b border-white/10 p-4 hover:bg-white/[0.03]">
+                  <div className="flex items-start gap-3">
+                    <button onClick={() => openXProfile(post)} className="w-10 h-10 rounded-full bg-linear-to-tr from-[var(--accent)] to-[var(--accent-to)] flex items-center justify-center flex-shrink-0">
+                      <User className="w-5 h-5 text-white" />
+                    </button>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <button onClick={() => openXProfile(post)} className="font-semibold text-white/90 hover:underline">{post.author}</button>
+                        <p className="text-sm text-white/35">{post.handle}</p>
+                      </div>
+                      <p className="mt-3 text-sm md:text-base leading-relaxed text-white/85 whitespace-pre-wrap break-words">{post.text}</p>
+                      <div className="mt-4 flex items-center justify-between text-xs text-white/45">
+                        <span className="flex items-center gap-1"><MessageCircle className="w-4 h-4" />{formatXMetric(post.commentsCount)}</span>
+                        <span className="flex items-center gap-1"><Repeat2 className="w-4 h-4" />{formatXMetric(post.reposts)}</span>
+                        <span className="flex items-center gap-1"><Heart className="w-4 h-4" />{formatXMetric(post.likes)}</span>
+                        <span>{formatXMetric(post.views)}</span>
+                        <Bookmark className="h-4 w-4" />
+                      </div>
+                      {!!post.comments.length && (
+                        <div className="mt-4 space-y-2 border-t border-white/10 pt-4">
+                          {post.comments.map((comment, index) => (
+                            <div key={`${post.id}-${index}`} className="rounded-2xl bg-white/5 p-3">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-xs font-semibold text-white/70">{comment.author}</p>
+                                <p className="text-[10px] text-white/30">{formatXMetric(comment.likes)} likes</p>
+                              </div>
+                              <p className="mt-1 text-sm text-white/60">{comment.text}</p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <button onClick={() => openXMessages(post)} className="mt-4 rounded-full border border-white/10 px-4 py-2 text-sm text-white/70 hover:bg-white/10">Message {post.author}</button>
+                    </div>
+                  </div>
+                </article>
+                  ))}
+
+                  {xScreen === "profile" && selectedXPost && (
+                    <div>
+                      <div className="h-32 bg-linear-to-r from-[var(--accent)]/30 to-[var(--accent-to)]/30" />
+                      <div className="px-4 pb-4">
+                        <div className="-mt-10 flex items-end justify-between">
+                          <div className="w-20 h-20 rounded-full border-4 border-[var(--app-bg)] bg-linear-to-tr from-[var(--accent)] to-[var(--accent-to)] flex items-center justify-center">
+                            <User className="w-9 h-9 text-white" />
+                          </div>
+                          <button onClick={() => openXMessages(selectedXPost)} className="rounded-full bg-white px-5 py-2 text-sm font-semibold text-black">Message</button>
+                        </div>
+                        <h2 className="mt-3 text-xl font-bold">{selectedXPost.author}</h2>
+                        <p className="text-sm text-white/35">{selectedXPost.handle}</p>
+                        <p className="mt-3 text-sm text-white/75">{selectedXPost.bio}</p>
+                        <div className="mt-3 flex gap-4 text-sm text-white/40">
+                          <span><b className="text-white/80">{selectedXPost.following}</b> Following</span>
+                          <span><b className="text-white/80">{selectedXPost.followers}</b> Followers</span>
+                        </div>
+                      </div>
+                      {selectedAuthorPosts.map((post) => (
+                        <article key={post.id} className="border-t border-white/10 p-4">
+                          <p className="text-sm text-white/85 whitespace-pre-wrap break-words">{post.text}</p>
+                          <div className="mt-4 grid grid-cols-4 gap-2 text-xs text-white/45">
+                            <span className="flex items-center gap-1"><MessageCircle className="w-4 h-4" />{formatXMetric(post.commentsCount)}</span>
+                            <span className="flex items-center gap-1"><Repeat2 className="w-4 h-4" />{formatXMetric(post.reposts)}</span>
+                            <span className="flex items-center gap-1"><Heart className="w-4 h-4" />{formatXMetric(post.likes)}</span>
+                            <span>{formatXMetric(post.views)}</span>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+
+                  {xScreen === "messages" && selectedXPost && (
+                    <div className="flex min-h-[calc(100vh-58px)] flex-col">
+                      <div className="border-b border-white/10 p-4">
+                        <div className="flex items-center gap-3">
+                          <button onClick={() => setXScreen("feed")} className="rounded-full p-2 text-white/60 hover:bg-white/10 hover:text-white">
+                            <ArrowLeft className="h-5 w-5" />
+                          </button>
+                          <button onClick={() => setXScreen("profile")} className="flex min-w-0 items-center gap-3 text-left">
+                            <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-linear-to-tr from-[var(--accent)] to-[var(--accent-to)]">
+                              <User className="h-5 w-5" />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="truncate font-semibold">{selectedXPost.author}</p>
+                              <p className="truncate text-sm text-white/35">{selectedXPost.handle}</p>
+                            </div>
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex-1 space-y-3 overflow-y-auto p-4 custom-scrollbar">
+                        <div className="mx-auto mb-6 max-w-sm text-center">
+                          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-linear-to-tr from-[var(--accent)] to-[var(--accent-to)]">
+                            <User className="h-8 w-8" />
+                          </div>
+                          <button onClick={() => setXScreen("profile")} className="mt-3 font-bold hover:underline">{selectedXPost.author}</button>
+                          <p className="text-sm text-white/35">{selectedXPost.handle}</p>
+                          <p className="mt-2 text-sm text-white/55">{selectedXPost.bio}</p>
+                        </div>
+                        {(xThreads[selectedXPost.handle] || []).map((message) => (
+                          <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                            <div className={`max-w-[76%] rounded-3xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] ${message.role === "user" ? "bg-[#1d9bf0] text-white" : "bg-[#202327] text-white/90"}`}>
+                              {message.text}
+                            </div>
+                          </div>
+                        ))}
+                        {isXMessageLoading && (
+                          <div className="flex justify-start">
+                            <div className="rounded-3xl bg-[#202327] px-4 py-3">
+                              <Loader2 className="h-4 w-4 animate-spin text-white/40" />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <div className="border-t border-white/10 p-4">
+                        <div className="flex items-end gap-2 rounded-3xl border border-white/10 bg-[#202327] p-2">
+                          <textarea value={xMessageInput} onChange={(event) => setXMessageInput(event.target.value)} onKeyDown={(event) => event.key === "Enter" && !event.shiftKey && (event.preventDefault(), sendXMessage())} rows={1} placeholder={`Написать ${selectedXPost.author}`} className="max-h-28 min-h-10 flex-1 resize-none bg-transparent px-3 py-2 text-sm text-white outline-none placeholder:text-white/35 custom-scrollbar" />
+                          <button onClick={sendXMessage} disabled={!xMessageInput.trim() || isXMessageLoading} className="rounded-full bg-[#1d9bf0] p-2 text-white disabled:opacity-40">
+                            <ArrowUp className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </section>
+
+                <aside className="hidden lg:block space-y-4 px-7 py-3">
+                  <div className="sticky top-0 z-10 bg-[var(--app-bg)] pb-3">
+                    <div className="flex items-center gap-3 rounded-full border border-white/15 px-4 py-3 text-white/40">
+                      <Search className="h-4 w-4" />
+                      <input value={xSearch} onChange={(event) => setXSearch(event.target.value)} placeholder="Поиск" className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/40" />
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-white/15 p-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="text-xl font-extrabold leading-tight">Подпишитесь на Premium</p>
+                      <span className="rounded-lg bg-emerald-500/20 px-2 py-1 text-xs font-bold text-emerald-300">{isXPremium ? "Активно" : "Скидка 50%"}</span>
+                    </div>
+                    <p className="mt-3 text-sm leading-relaxed text-white/80">Уберите рекламу, смотрите аналитику, поднимите просмотры ваших ответов и разблокируйте более 20 функций.</p>
+                    <button onClick={() => setIsXPremium((current) => !current)} className="mt-4 rounded-full bg-[#1d9bf0] px-5 py-2 text-sm font-bold text-white">{isXPremium ? "Premium включен" : "Подписаться"}</button>
+                  </div>
+                  <div className="rounded-2xl border border-white/15 p-5">
+                    <p className="text-xl font-extrabold">Что происходит</p>
+                    <div className="mt-4 space-y-4">
+                      {["Father's Day", "GuMo", "Verteidigungsminister", "Gipfel"].map((trend) => (
+                        <button key={trend} onClick={() => setXSearch(trend)} className="block w-full text-left">
+                          <p className="text-xs text-white/40">Актуально · Германия</p>
+                          <p className="font-bold">{trend}</p>
+                        </button>
+                      ))}
+                    </div>
+                    <button className="mt-4 text-sm text-[#1d9bf0]">Показать ещё</button>
+                  </div>
+                  <div className="rounded-2xl border border-white/15 p-5">
+                    <p className="text-xl font-extrabold">Кого читать</p>
+                    <div className="mt-4 space-y-3">
+                      {filteredXPosts.slice(0, 4).map((post) => (
+                        <div key={`${post.id}-follow`} className="flex w-full items-center gap-3">
+                          <button onClick={() => openXProfile(post)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+                          <div className="h-9 w-9 rounded-full bg-linear-to-tr from-[var(--accent)] to-[var(--accent-to)]" />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium">{post.author}</p>
+                            <p className="truncate text-xs text-white/35">{post.handle}</p>
+                          </div>
+                          </button>
+                          <button onClick={() => toggleFollow(post.handle)} className="rounded-full bg-white px-4 py-1.5 text-xs font-bold text-black">{followedHandles.includes(post.handle) ? "Читаю" : "Читать"}</button>
+                        </div>
+                      ))}
+                    </div>
+                    <button className="mt-4 text-sm text-[#1d9bf0]">Показать ещё</button>
+                  </div>
+                </aside>
+              </div>
+            </div>
+          ) : (
+            <>
+          {!messages.length && (
+            <div className="h-full min-h-[360px] flex flex-col items-center justify-center text-center">
+              <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">С чего начнем?</h1>
+              {activeProject ? (
+                <button onClick={() => setIsProjectOpen(true)} className="mt-8 inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 transition-colors text-sm text-white/80">
+                  <Folder className="w-4 h-4" />
+                  {activeProject.name || "Project"}
+                </button>
+              ) : (
+                <button onClick={createNewProject} className="mt-8 inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 transition-colors text-sm text-white/80">
+                  <FolderPlus className="w-4 h-4" />
+                  Create Project
+                </button>
+              )}
+            </div>
+          )}
+
+          {messages.map((message, index) => {
+            if (message.role === "assistant" && !message.content.trim() && !message.images?.length) return null;
+
+            return (
+            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} key={index} className={`flex gap-4 md:gap-6 ${message.role === "user" ? "justify-end" : ""}`}>
+              {message.role === "assistant" && (
+                <div className="w-8 h-8 rounded-lg bg-linear-to-tr from-[var(--accent)] to-[var(--accent-to)] flex-shrink-0 flex items-center justify-center mt-1">
+                  <Sparkles className="w-4 h-4 text-white" />
+                </div>
+              )}
+
+              <div className={`min-w-0 space-y-3 ${message.role === "user" ? "order-1 max-w-[92%] md:max-w-[78%]" : "w-full max-w-[min(1180px,calc(100vw-7rem))]"}`}>
+                {!!message.images?.length && (
+                  <div className="grid grid-cols-2 gap-2">
+                    {message.images.slice(0, 4).map((image) => (
+                      <img key={image.id} src={image.dataUrl} alt={image.name} className="h-28 w-full rounded-2xl object-cover border border-white/10" />
+                    ))}
+                  </div>
+                )}
+                <div
+                  className={`message-bubble p-4 md:p-5 rounded-[2rem] text-sm md:text-base leading-relaxed break-words [overflow-wrap:anywhere] ${message.role === "user" ? "max-h-[46vh] overflow-y-auto custom-scrollbar whitespace-pre-wrap pr-5" : "assistant-markdown"}`}
+                  style={message.role === "user"
+                    ? { background: "var(--user-bubble)", color: "var(--user-text)", borderTopRightRadius: 0 }
+                    : { background: "rgba(255,255,255,0.05)", color: "rgba(255,255,255,0.9)", border: "1px solid rgba(255,255,255,0.1)", borderTopLeftRadius: 0 }}
+                >
+                  {message.role === "assistant" ? (
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        table: ({ children }) => (
+                          <div className="markdown-table-wrap">
+                            <table>{children}</table>
+                          </div>
+                        )
+                      }}
+                    >
+                      {message.content}
+                    </ReactMarkdown>
+                  ) : (
+                    message.content
+                  )}
+                </div>
+                <div className={`flex flex-wrap gap-2 ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                  <button
+                    type="button"
+                    onClick={() => copyMessageText(message.content)}
+                    title={message.role === "assistant" ? "Копировать ответ" : "Копировать"}
+                    aria-label={message.role === "assistant" ? "Копировать ответ" : "Копировать"}
+                    className="message-action-button"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                    <span>{message.role === "assistant" ? "Копировать ответ" : "Копировать"}</span>
+                  </button>
+                  {message.role === "user" ? (
+                    <button
+                      type="button"
+                      onClick={() => editUserMessage(index)}
+                      disabled={isLoading}
+                      title="Редактировать"
+                      aria-label="Редактировать"
+                      className="message-action-button disabled:opacity-35"
+                    >
+                      <Edit3 className="h-3.5 w-3.5" />
+                      <span>Редактировать</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => regenerateAssistantMessage(index)}
+                      disabled={isLoading}
+                      title="Перегенерировать"
+                      aria-label="Перегенерировать"
+                      className="message-action-button disabled:opacity-35"
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      <span>Перегенерировать</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {message.role === "user" && (
+                <div className="w-8 h-8 rounded-full bg-white/10 border border-white/20 flex-shrink-0 flex items-center justify-center mt-1 order-2">
+                  <User className="w-4 h-4 text-white/60" />
+                </div>
+              )}
+            </motion.div>
+            );
+          })}
+
+          {isWaitingForFirstToken && (
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-4 md:gap-6">
+              <div className="w-8 h-8 rounded-lg bg-linear-to-tr from-[var(--accent)] to-[var(--accent-to)] flex-shrink-0 flex items-center justify-center mt-1">
+                <Loader2 className="w-4 h-4 text-white animate-spin" />
+              </div>
+              <div className="rounded-3xl rounded-tl-none border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/55">
+                Думаю...
+              </div>
+            </motion.div>
+          )}
+          <div ref={chatEndRef} />
+            </>
+          )}
+        </div>
+
+        {activeView === "chat" && <div className="p-4 md:p-8 max-w-4xl mx-auto w-full">
+          {!!activeProject?.images.length && (
+            <div className="mb-3 flex items-center gap-2 overflow-x-auto pb-1 custom-scrollbar">
+              {activeProject.images.map((image) => (
+                <button key={image.id} onClick={() => setIsProjectOpen(true)} className="h-10 w-10 flex-shrink-0 overflow-hidden rounded-xl border border-white/10 bg-white/5" title={image.name}>
+                  <img src={image.dataUrl} alt={image.name} className="h-full w-full object-cover" />
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="relative group">
+            <div className="absolute -inset-1 bg-linear-to-r from-[var(--accent)]/20 to-[var(--accent-to)]/20 rounded-[2.5rem] blur-xl opacity-0 group-focus-within:opacity-100 transition-opacity" />
+            <div className="relative bg-white/5 backdrop-blur-2xl border border-white/10 rounded-[2rem] p-2 flex items-end gap-2 shadow-2xl transition-all duration-300 group-focus-within:border-white/20">
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && !event.shiftKey && (event.preventDefault(), handleSend())}
+                placeholder={apiKey ? `Message ${activeName}...` : "Please set API Key in settings..."}
+                className="flex-1 bg-transparent border-none focus:ring-0 focus:outline-none text-white placeholder:text-white/20 py-3 px-4 resize-none max-h-[220px] min-h-[44px] text-base md:text-lg overflow-y-auto custom-scrollbar break-words [overflow-wrap:anywhere]"
+                rows={1}
+              />
+
+              <button onClick={handleSend} disabled={!input.trim() || isLoading} className={`p-3 rounded-full transition-all flex items-center justify-center ${input.trim() && !isLoading ? "bg-white text-black scale-100 shadow-[0_0_20px_rgba(255,255,255,0.3)]" : "bg-white/10 text-white/20 scale-90 grayscale cursor-not-allowed"}`}>
+                <ArrowUp className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+        </div>}
+      </main>
+
+      <AnimatePresence>
+        {activeView === "x" && isXComposerOpen && (
+          <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 px-4 pt-16 backdrop-blur-sm">
+            <motion.div initial={{ opacity: 0, scale: 0.96, y: -10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96, y: -10 }} className="w-full max-w-xl overflow-hidden rounded-3xl border border-white/10 bg-black shadow-2xl">
+              <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+                <button onClick={() => setIsXComposerOpen(false)} className="rounded-full p-2 text-white/70 hover:bg-white/10 hover:text-white">
+                  <X className="h-5 w-5" />
+                </button>
+                <button onClick={publishXPost} disabled={!xDraft.trim()} className="rounded-full bg-white px-5 py-2 text-sm font-bold text-black disabled:opacity-40">
+                  Опубликовать
+                </button>
+              </div>
+              <div className="flex gap-3 p-4">
+                <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-[#ff4b25] font-semibold">{(xUserName.trim()[0] || "U").toUpperCase()}</div>
+                <div className="min-w-0 flex-1">
+                  <textarea
+                    autoFocus
+                    value={xDraft}
+                    onChange={(event) => setXDraft(event.target.value)}
+                    rows={5}
+                    placeholder="Что происходит?"
+                    className="max-h-72 min-h-32 w-full resize-none bg-transparent text-xl text-white outline-none placeholder:text-white/40 custom-scrollbar"
+                  />
+                  <div className="mt-4 flex items-center justify-between border-t border-white/10 pt-4">
+                    <div className="flex gap-4 text-[#1d9bf0]">
+                      <ImagePlus className="h-5 w-5" />
+                      <Hash className="h-5 w-5" />
+                      <Sparkles className="h-5 w-5" />
+                      <CircleEllipsis className="h-5 w-5" />
+                    </div>
+                    <p className="text-xs text-white/35">{Math.max(0, 280 - xDraft.length)} символов</p>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {isSettingsOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsSettingsOpen(false)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-md bg-[var(--panel-bg)] border border-white/10 rounded-[2.5rem] p-8 shadow-2xl overflow-hidden">
+              <div className="absolute top-0 left-0 w-full h-1 bg-linear-to-r from-[var(--accent)] to-[var(--accent-to)]" />
+              <div className="flex items-center justify-between mb-8">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-xl bg-white/5 border border-white/10 text-[var(--accent)]">
+                    <Settings className="w-5 h-5" />
+                  </div>
+                  <h2 className="text-xl font-semibold">Local Settings</h2>
+                </div>
+                <button onClick={() => setIsSettingsOpen(false)} className="p-2 hover:bg-white/5 rounded-full transition-colors text-white/40 hover:text-white">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-6 max-h-[70vh] overflow-y-auto pr-1 custom-scrollbar">
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase tracking-widest font-bold text-white/40 flex items-center gap-2">
+                    <ShieldCheck className="w-3 h-3" /> OpenRouter API Key
+                  </label>
+                  <input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="sk-or-v1-..." className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm focus:outline-none focus:border-[var(--accent)]/50 transition-colors" />
+                  <p className="text-[10px] text-white/20 leading-relaxed">Ключ хранится локально в браузере и используется только для запросов к OpenRouter.</p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase tracking-widest font-bold text-white/40 flex items-center gap-2">
+                    <Cpu className="w-3 h-3" /> Model selection
+                  </label>
+                  <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm focus:outline-none focus:border-[var(--accent)]/50 appearance-none transition-colors">
+                    {MODEL_OPTIONS.map((model) => <option key={model.value} value={model.value}>{model.label}</option>)}
+                  </select>
+                  <label className="flex items-center gap-3 rounded-2xl bg-white/5 border border-white/10 p-4 text-sm text-white/70">
+                    <input type="checkbox" checked={useCustomModel} onChange={(event) => setUseCustomModel(event.target.checked)} className="h-4 w-4 accent-[var(--accent)]" />
+                    Use custom OpenRouter model id
+                  </label>
+                  {useCustomModel && (
+                    <input value={customModel} onChange={(event) => setCustomModel(event.target.value)} placeholder="for example: meta-llama/llama-3.1-70b-instruct" className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm focus:outline-none focus:border-[var(--accent)]/50 transition-colors" />
+                  )}
+                  <p className="text-[10px] text-white/20 leading-relaxed">Для своей модели вставь точный model id из OpenRouter. Если поле пустое, будет использована выбранная модель из списка.</p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase tracking-widest font-bold text-white/40 flex items-center gap-2">
+                    <WandSparkles className="w-3 h-3" /> Global assistant prompt
+                  </label>
+                  <textarea
+                    value={globalPrompt}
+                    onChange={(event) => setGlobalPrompt(event.target.value)}
+                    placeholder="Общие правила для всех чатов: язык, стиль ответа, формат, ограничения, роль помощника..."
+                    rows={6}
+                    className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm focus:outline-none focus:border-[var(--accent)]/50 transition-colors resize-none custom-scrollbar"
+                  />
+                  <p className="text-[10px] text-white/20 leading-relaxed">Этот промпт применяется ко всем проектам и чатам. Инструкции конкретного проекта добавляются сверху как контекст проекта.</p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase tracking-widest font-bold text-white/40 flex items-center gap-2">
+                    <Palette className="w-3 h-3" /> Theme
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {THEME_OPTIONS.map((theme) => (
+                      <button key={theme.id} onClick={() => setThemeId(theme.id)} className={`flex items-center gap-3 rounded-2xl border p-3 text-left transition-colors ${theme.id === themeId ? "border-white/30 bg-white/10" : "border-white/10 bg-white/5 hover:bg-white/10"}`}>
+                        <span className="h-5 w-5 rounded-full" style={{ background: `linear-gradient(135deg, ${theme.accent}, ${theme.accentTo})` }} />
+                        <span className="text-sm text-white/70">{theme.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <button onClick={() => setIsSettingsOpen(false)} className="w-full py-4 bg-white text-black font-bold rounded-2xl hover:bg-gray-200 transition-colors mt-4">
+                  Save & Close
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {isProjectOpen && activeProject && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsProjectOpen(false)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-2xl bg-[var(--panel-bg)] border border-white/10 rounded-[2.5rem] p-8 shadow-2xl overflow-hidden">
+              <div className="absolute top-0 left-0 w-full h-1 bg-linear-to-r from-[var(--accent)] to-[var(--accent-to)]" />
+              <div className="flex items-center justify-between mb-8">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-xl bg-white/5 border border-white/10 text-[var(--accent)]">
+                    <Folder className="w-5 h-5" />
+                  </div>
+                  <h2 className="text-xl font-semibold">Project Folder</h2>
+                </div>
+                <button onClick={() => setIsProjectOpen(false)} className="p-2 hover:bg-white/5 rounded-full transition-colors text-white/40 hover:text-white">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-5 max-h-[72vh] overflow-y-auto pr-1 custom-scrollbar">
+                <div className="grid md:grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <label className="text-[10px] uppercase tracking-widest font-bold text-white/40">Project name</label>
+                    <input value={activeProject.name} onChange={(event) => updateActiveProject({ name: event.target.value })} placeholder="Project name" className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm focus:outline-none focus:border-[var(--accent)]/50 transition-colors" />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] uppercase tracking-widest font-bold text-white/40">Assistant name</label>
+                    <input value={activeProject.assistantName || ""} onChange={(event) => updateActiveProject({ assistantName: event.target.value })} placeholder="Aether" className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm focus:outline-none focus:border-[var(--accent)]/50 transition-colors" />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase tracking-widest font-bold text-white/40 flex items-center gap-2">
+                    <WandSparkles className="w-3 h-3" /> Project instructions
+                  </label>
+                  <textarea value={activeProject.prompt} onChange={(event) => updateActiveProject({ prompt: event.target.value })} placeholder="Инструкции именно для этого проекта: контекст, цель, стиль работы, правила, формат ответов, роли, если они нужны..." rows={7} className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm focus:outline-none focus:border-[var(--accent)]/50 transition-colors resize-none custom-scrollbar" />
+                </div>
+
+                <div onDragOver={(event) => { event.preventDefault(); setIsDraggingImages(true); }} onDragLeave={() => setIsDraggingImages(false)} onDrop={handleProjectDrop} className={`rounded-[2rem] border border-dashed p-5 transition-colors ${isDraggingImages ? "border-[var(--accent)] bg-white/10" : "border-white/10 bg-white/5"}`}>
+                  <input ref={imageInputRef} type="file" accept="image/*" multiple onChange={handleProjectFilePick} className="hidden" />
+                  <button onClick={() => imageInputRef.current?.click()} className="w-full flex flex-col items-center justify-center gap-3 rounded-2xl py-8 text-white/60 hover:text-white transition-colors">
+                    <ImagePlus className="w-8 h-8 text-[var(--accent)]" />
+                    <span className="text-sm font-medium">Drag & drop local project files here or click to choose</span>
+                    <span className="text-[10px] text-white/30">Files belong to this project folder. Chats inside the project can use them as references.</span>
+                  </button>
+                </div>
+
+                {!!activeProject.images.length && (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {activeProject.images.map((image) => (
+                      <div key={image.id} className="group relative overflow-hidden rounded-2xl border border-white/10 bg-white/5">
+                        <img src={image.dataUrl} alt={image.name} className="h-28 w-full object-cover" />
+                        <button onClick={() => removeProjectImage(image.id)} className="absolute right-2 top-2 p-2 rounded-full bg-black/60 text-white/70 opacity-100 md:opacity-0 group-hover:opacity-100 transition-opacity hover:text-white" title="Remove file">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                        <p className="p-2 text-[10px] text-white/40 truncate">{image.name}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <button onClick={() => setIsProjectOpen(false)} className="w-full py-4 bg-white text-black font-bold rounded-2xl hover:bg-gray-200 transition-colors">
+                  Save Project
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <style dangerouslySetInnerHTML={{ __html: `
+        .custom-scrollbar {
+          scrollbar-width: thin;
+          scrollbar-color: color-mix(in srgb, var(--accent) 70%, transparent) transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+          width: 5px;
+          height: 5px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background: color-mix(in srgb, var(--accent) 55%, transparent);
+          border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background: color-mix(in srgb, var(--accent) 85%, transparent);
+        }
+        .assistant-markdown {
+          overflow: visible;
+        }
+        .assistant-markdown > * + * {
+          margin-top: 0.9rem;
+        }
+        .assistant-markdown p {
+          margin: 0;
+        }
+        .assistant-markdown strong {
+          font-weight: 700;
+          color: rgba(255,255,255,0.96);
+        }
+        .assistant-markdown em {
+          color: rgba(255,255,255,0.82);
+        }
+        .assistant-markdown ul,
+        .assistant-markdown ol {
+          margin: 0;
+          padding-left: 1.35rem;
+        }
+        .assistant-markdown li + li {
+          margin-top: 0.35rem;
+        }
+        .assistant-markdown hr {
+          border: 0;
+          border-top: 1px solid rgba(255,255,255,0.14);
+          margin: 1.1rem 0;
+        }
+        .assistant-markdown code {
+          border: 1px solid rgba(255,255,255,0.12);
+          border-radius: 0.45rem;
+          background: rgba(255,255,255,0.08);
+          padding: 0.12rem 0.35rem;
+          font-size: 0.92em;
+          color: rgba(255,255,255,0.95);
+        }
+        .assistant-markdown pre {
+          overflow-x: auto;
+          border: 1px solid rgba(255,255,255,0.12);
+          border-radius: 1rem;
+          background: rgba(0,0,0,0.38);
+          padding: 1rem;
+        }
+        .assistant-markdown pre code {
+          border: 0;
+          border-radius: 0;
+          background: transparent;
+          padding: 0;
+          white-space: pre;
+        }
+        .assistant-markdown .markdown-table-wrap {
+          width: 100%;
+          max-width: 100%;
+          overflow-x: auto;
+          border-radius: 0.9rem;
+          border: 1px solid rgba(255,255,255,0.14);
+          scrollbar-width: thin;
+          scrollbar-color: color-mix(in srgb, var(--accent) 70%, transparent) transparent;
+        }
+        .assistant-markdown .markdown-table-wrap::-webkit-scrollbar {
+          height: 6px;
+        }
+        .assistant-markdown .markdown-table-wrap::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .assistant-markdown .markdown-table-wrap::-webkit-scrollbar-thumb {
+          background: color-mix(in srgb, var(--accent) 55%, transparent);
+          border-radius: 999px;
+        }
+        .assistant-markdown table {
+          width: 100%;
+          min-width: 760px;
+          border-collapse: collapse;
+          font-size: 0.95em;
+          line-height: 1.45;
+        }
+        .assistant-markdown th,
+        .assistant-markdown td {
+          border: 1px solid rgba(255,255,255,0.14);
+          padding: 0.65rem 0.8rem;
+          text-align: left;
+          vertical-align: top;
+        }
+        .assistant-markdown th {
+          background: rgba(255,255,255,0.08);
+          font-weight: 700;
+          color: rgba(255,255,255,0.95);
+        }
+        .assistant-markdown td {
+          color: rgba(255,255,255,0.82);
+        }
+        .message-action-button {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 28px;
+          height: 28px;
+          border: 1px solid rgba(255,255,255,0.10);
+          border-radius: 999px;
+          background: rgba(255,255,255,0.03);
+          padding: 0.375rem;
+          color: rgba(255,255,255,0.45);
+          transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+        }
+        .message-action-button:hover {
+          background: rgba(255,255,255,0.10);
+          border-color: rgba(255,255,255,0.18);
+          color: white;
+        }
+        .message-action-button span {
+          display: none;
+        }
+        .message-bubble::-webkit-scrollbar {
+          width: 4px;
+        }
+        select option {
+          background: var(--panel-bg);
+          color: white;
+        }
+      `}} />
+    </div>
+  );
+};
