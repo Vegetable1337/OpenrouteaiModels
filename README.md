@@ -1,7 +1,7 @@
 
-  # Минималистичный сайт ИИ
+  # Ai X and ChatBot
 
-  This is a code bundle for Минималистичный сайт ИИ. The original project is available at https://www.figma.com/design/cTJwPVSSjvGWd2Zm29kPTI/%D0%9C%D0%B8%D0%BD%D0%B8%D0%BC%D0%B0%D0%BB%D0%B8%D1%81%D1%82%D0%B8%D1%87%D0%BD%D1%8B%D0%B9-%D1%81%D0%B0%D0%B9%D1%82-%D0%98%D0%98.
+  This is a code bundle for AI 100% note vibecode
 
   ## Running the code
 
