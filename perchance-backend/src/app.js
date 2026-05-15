@@ -54,7 +54,8 @@ function createApp() {
   <main>
     <h1>Perchance verification</h1>
     <p>${result.message}</p>
-    <p>After verification, return to Aether Chat and send the image request again.</p>
+    <p>In the opened Perchance window, use the normal generator page once. If it shows a Cloudflare check, complete it. If the generator page appears, press its generate button once so Aether can capture the temporary key.</p>
+    <p>After that, return to Aether Chat and send the image request again.</p>
     <p>Status endpoint: <a href="/verify/status"><code>/verify/status</code></a></p>
   </main>
 </body>

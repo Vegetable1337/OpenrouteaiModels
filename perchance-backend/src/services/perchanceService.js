@@ -13,6 +13,14 @@ let cachedUserKey = "";
 let verificationBrowser = null;
 let verificationPage = null;
 
+function captureUserKeyFromUrl(url) {
+  const match = url.match(/[?&]userKey=([a-f\d]{64})/i);
+  if (match?.[1]) {
+    cachedUserKey = match[1];
+    logger.info("Captured Perchance userKey from browser traffic");
+  }
+}
+
 const http = axios.create({
   timeout: config.requestTimeoutMs,
   headers: {
@@ -83,6 +91,11 @@ async function readUserKeyFromVerifyPage(page) {
 }
 
 async function extractUserKeyWithPuppeteer() {
+  if (!config.perchance.headless) {
+    await openVerificationBrowser();
+    throw makeError("Perchance needs visible verification. Use the opened Perchance page once, then retry generation.", 502);
+  }
+
   logger.info("Extracting Perchance userKey through Puppeteer");
 
   let browser;
@@ -94,28 +107,32 @@ async function extractUserKeyWithPuppeteer() {
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     );
+    page.on("request", (request) => captureUserKeyFromUrl(request.url()));
 
     const startedAt = Date.now();
-    let userKey = await readUserKeyFromVerifyPage(page);
+    await page.goto(config.perchance.pageUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: config.requestTimeoutMs
+    });
 
-    while (!userKey && Date.now() - startedAt < config.perchance.verificationTimeoutMs) {
-      if (!config.perchance.headless) {
-        logger.info("Waiting for visible browser verification to complete");
+    const frames = page.frames();
+    for (const frame of frames) {
+      const button = await frame.$("button#generateButtonEl").catch(() => null);
+      if (button) {
+        await button.click().catch(() => undefined);
+        break;
       }
+    }
 
+    while (!cachedUserKey && Date.now() - startedAt < config.perchance.verificationTimeoutMs) {
       await new Promise((resolve) => setTimeout(resolve, 5000));
-      userKey = await readUserKeyFromVerifyPage(page);
     }
 
-    if (!userKey) {
-      const hint = config.perchance.headless
-        ? "Set PERCHANCE_HEADLESS=false and run again so you can pass Perchance/Cloudflare verification once."
-        : "Complete the visible Perchance verification window and retry.";
-      throw makeError(`Failed to retrieve Perchance userKey. ${hint}`, 502);
+    if (!cachedUserKey) {
+      throw makeError("Failed to retrieve Perchance userKey from page workflow.", 502);
     }
 
-    cachedUserKey = userKey;
-    return userKey;
+    return cachedUserKey;
   } catch (error) {
     throw makeError(`Puppeteer fallback failed: ${error.message}`, 502, error);
   } finally {
@@ -143,6 +160,7 @@ async function openVerificationBrowser() {
   await verificationPage.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
   );
+  verificationPage.on("request", (request) => captureUserKeyFromUrl(request.url()));
   await verificationPage.goto(config.perchance.pageUrl, {
     waitUntil: "domcontentloaded",
     timeout: config.requestTimeoutMs
@@ -163,16 +181,7 @@ async function closeVerificationBrowser() {
 }
 
 async function getVerificationStatus() {
-  let userKey = cachedUserKey || config.perchance.userKey;
-
-  if (!userKey && verificationPage && !verificationPage.isClosed()) {
-    try {
-      userKey = await readUserKeyFromVerifyPage(verificationPage);
-      if (userKey) cachedUserKey = userKey;
-    } catch (error) {
-      logger.warn(`Could not read verification status: ${error.message}`);
-    }
-  }
+  const userKey = cachedUserKey || config.perchance.userKey;
 
   return {
     verified: Boolean(userKey),
@@ -252,10 +261,13 @@ async function generateWithPuppeteer({ prompt, negativePrompt, style, resolution
       );
     }
 
-    const userKey = cachedUserKey || config.perchance.userKey || (await readUserKeyFromVerifyPage(page));
+    const userKey = cachedUserKey || config.perchance.userKey;
     if (!userKey) {
+      if (!config.perchance.headless) {
+        await openVerificationBrowser();
+      }
       throw makeError(
-        "Perchance requires browser verification before generation. Open http://localhost:3001/verify, pass verification in the opened browser, then retry.",
+        "Perchance requires browser verification before generation. Use the opened Perchance page once, then retry.",
         502
       );
     }
