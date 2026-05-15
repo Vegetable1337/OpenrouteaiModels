@@ -38,6 +38,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChangeEvent, CSSProperties, DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate, useParams } from "react-router";
 
 interface LocalImage {
   id: string;
@@ -57,6 +58,21 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   images?: LocalImage[];
+}
+
+interface ThemeConfig {
+  id: string;
+  label: string;
+  appBg: string;
+  sidebarBg: string;
+  panelBg: string;
+  accent: string;
+  accentTo: string;
+  userBubble: string;
+  userText: string;
+  radius: number;
+  fontScale: number;
+  inputWidth: number;
 }
 
 interface SavedChat {
@@ -125,12 +141,13 @@ const MODEL_OPTIONS = [
   { value: "deepseek/deepseek-chat", label: "DeepSeek V3 (Economic)" },
 ];
 
-const THEME_OPTIONS = [
-  { id: "aether", label: "Aether", appBg: "#000000", sidebarBg: "#0A0A0A", panelBg: "#121212", accent: "#A855F7", accentTo: "#3B82F6", userBubble: "#FFFFFF", userText: "#000000" },
-  { id: "graphite", label: "Graphite", appBg: "#09090B", sidebarBg: "#111113", panelBg: "#18181B", accent: "#A1A1AA", accentTo: "#52525B", userBubble: "#E4E4E7", userText: "#09090B" },
-  { id: "ember", label: "Ember", appBg: "#0E0705", sidebarBg: "#160D0A", panelBg: "#1F130F", accent: "#F97316", accentTo: "#EF4444", userBubble: "#FFF7ED", userText: "#1C0A03" },
-  { id: "aurora", label: "Aurora", appBg: "#020617", sidebarBg: "#07111F", panelBg: "#0B1627", accent: "#14B8A6", accentTo: "#8B5CF6", userBubble: "#CCFBF1", userText: "#042F2E" },
+const THEME_OPTIONS: ThemeConfig[] = [
+  { id: "aether", label: "Aether", appBg: "#000000", sidebarBg: "#0A0A0A", panelBg: "#121212", accent: "#A855F7", accentTo: "#3B82F6", userBubble: "#2F2F2F", userText: "#F5F5F5", radius: 32, fontScale: 1, inputWidth: 896 },
+  { id: "graphite", label: "Graphite", appBg: "#09090B", sidebarBg: "#111113", panelBg: "#18181B", accent: "#A1A1AA", accentTo: "#52525B", userBubble: "#E4E4E7", userText: "#09090B", radius: 26, fontScale: 1, inputWidth: 896 },
+  { id: "ember", label: "Ember", appBg: "#0E0705", sidebarBg: "#160D0A", panelBg: "#1F130F", accent: "#F97316", accentTo: "#EF4444", userBubble: "#FFF7ED", userText: "#1C0A03", radius: 28, fontScale: 1, inputWidth: 896 },
+  { id: "aurora", label: "Aurora", appBg: "#020617", sidebarBg: "#07111F", panelBg: "#0B1627", accent: "#14B8A6", accentTo: "#8B5CF6", userBubble: "#CCFBF1", userText: "#042F2E", radius: 30, fontScale: 1, inputWidth: 896 },
 ];
+const DEFAULT_CUSTOM_THEME: ThemeConfig = { ...THEME_OPTIONS[0], id: "custom", label: "Custom" };
 
 const DEFAULT_PROMPT = "You are Aether, a helpful local AI assistant. Answer clearly, adapt to the user's task, and respond in the user's language.";
 const PROJECT_FALLBACK_PROMPT = "Use the active project's name, instructions, files, and chat history as context. If project files are attached, use them only when relevant.";
@@ -155,6 +172,10 @@ const PROMPT_TEMPLATES = [
   {
     title: "Помощник по проекту",
     prompt: "Act as a project assistant. Use project instructions, files, and chat history to plan work, track decisions, summarize context, and propose next actions."
+  },
+  {
+    title: "Дизайнер сайта",
+    prompt: "Act as a UI theme designer for this app. When the user asks to change the site's look, return a short explanation and a JSON object in a fenced ```json block with a theme object. Allowed keys: appBg, sidebarBg, panelBg, accent, accentTo, userBubble, userText, radius, fontScale, inputWidth. Use valid #RRGGBB hex colors only. Keep contrast readable: dark app/sidebar backgrounds, userBubble and userText contrast at least 4.5:1. Keep radius 10-42, fontScale 0.9-1.15, inputWidth 640-1120. Avoid extreme neon/full-white backgrounds that make the app unusable. Do not include code changes."
   }
 ];
 
@@ -239,6 +260,96 @@ const getChatTitle = (messages: Message[]) => {
   return firstUserMessage?.content.trim().slice(0, 42) || "New chat";
 };
 
+const normalizeAssistantMarkdown = (content: string) => (
+  content.replace(/<br\s*\/?>/gi, "  \n")
+);
+
+const isHexColor = (value: unknown) => (
+  typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value.trim())
+);
+
+const clampNumber = (value: unknown, fallback: number, min: number, max: number) => {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+
+  return Math.min(max, Math.max(min, number));
+};
+
+const relativeLuminance = (hex: string) => {
+  const channels = [1, 3, 5].map((start) => {
+    const value = parseInt(hex.slice(start, start + 2), 16) / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+};
+
+const contrastRatio = (first: string, second: string) => {
+  const lighter = Math.max(relativeLuminance(first), relativeLuminance(second));
+  const darker = Math.min(relativeLuminance(first), relativeLuminance(second));
+
+  return (lighter + 0.05) / (darker + 0.05);
+};
+
+const sanitizeTheme = (theme: Partial<ThemeConfig>, base: ThemeConfig = DEFAULT_CUSTOM_THEME): ThemeConfig => {
+  const next: ThemeConfig = {
+    ...base,
+    id: "custom",
+    label: "Custom",
+    appBg: isHexColor(theme.appBg) ? String(theme.appBg).trim() : base.appBg,
+    sidebarBg: isHexColor(theme.sidebarBg) ? String(theme.sidebarBg).trim() : base.sidebarBg,
+    panelBg: isHexColor(theme.panelBg) ? String(theme.panelBg).trim() : base.panelBg,
+    accent: isHexColor(theme.accent) ? String(theme.accent).trim() : base.accent,
+    accentTo: isHexColor(theme.accentTo) ? String(theme.accentTo).trim() : base.accentTo,
+    userBubble: isHexColor(theme.userBubble) ? String(theme.userBubble).trim() : base.userBubble,
+    userText: isHexColor(theme.userText) ? String(theme.userText).trim() : base.userText,
+    radius: clampNumber(theme.radius, base.radius, 10, 42),
+    fontScale: clampNumber(theme.fontScale, base.fontScale, 0.9, 1.15),
+    inputWidth: clampNumber(theme.inputWidth, base.inputWidth, 640, 1120)
+  };
+
+  if (contrastRatio(next.userBubble, next.userText) < 4.5) {
+    next.userBubble = DEFAULT_CUSTOM_THEME.userBubble;
+    next.userText = DEFAULT_CUSTOM_THEME.userText;
+  }
+
+  if (contrastRatio(next.appBg, "#ffffff") < 4.5) {
+    next.appBg = DEFAULT_CUSTOM_THEME.appBg;
+  }
+
+  if (contrastRatio(next.sidebarBg, "#ffffff") < 4.5) {
+    next.sidebarBg = DEFAULT_CUSTOM_THEME.sidebarBg;
+  }
+
+  if (contrastRatio(next.panelBg, "#ffffff") < 4.5) {
+    next.panelBg = DEFAULT_CUSTOM_THEME.panelBg;
+  }
+
+  return next;
+};
+
+const loadCustomTheme = () => {
+  try {
+    return sanitizeTheme(JSON.parse(localStorage.getItem("aether_custom_theme") || "{}"));
+  } catch {
+    return DEFAULT_CUSTOM_THEME;
+  }
+};
+
+const extractDesignTheme = (content: string): Partial<ThemeConfig> | null => {
+  const jsonText = content.match(/```json\s*([\s\S]*?)```/)?.[1] || content.match(/\{[\s\S]*\}/)?.[0];
+  if (!jsonText) return null;
+
+  try {
+    const parsed = JSON.parse(jsonText);
+    const theme = parsed.theme || parsed;
+
+    return typeof theme === "object" && theme ? theme : null;
+  } catch {
+    return null;
+  }
+};
+
 const fallbackXPosts: XPost[] = [
   {
     id: crypto.randomUUID(),
@@ -260,6 +371,9 @@ const fallbackXPosts: XPost[] = [
 ];
 
 export const ChatPage = () => {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const params = useParams();
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [savedChats, setSavedChats] = useState<SavedChat[]>(() => loadSavedChats());
@@ -300,6 +414,7 @@ export const ChatPage = () => {
   const [customModel, setCustomModel] = useState(() => localStorage.getItem("openrouter_custom_model") || "");
   const [useCustomModel, setUseCustomModel] = useState(() => localStorage.getItem("openrouter_use_custom_model") === "true");
   const [themeId, setThemeId] = useState(() => localStorage.getItem("aether_theme") || "aether");
+  const [customTheme, setCustomTheme] = useState<ThemeConfig>(() => loadCustomTheme());
   const [globalPrompt, setGlobalPrompt] = useState(() => localStorage.getItem("aether_global_prompt") || DEFAULT_PROMPT);
   const [activePromptModifierTitle, setActivePromptModifierTitle] = useState(() => localStorage.getItem("aether_prompt_modifier") || "");
   const [assistantMemory, setAssistantMemory] = useState(() => localStorage.getItem("aether_memory") || "");
@@ -332,15 +447,18 @@ export const ChatPage = () => {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const promptMenuRef = useRef<HTMLDivElement>(null);
   const skipNextChatSaveRef = useRef(false);
   const activeChatIdRef = useRef(activeChatId);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const routeSyncRef = useRef(false);
 
   activeChatIdRef.current = activeChatId;
 
   const activeProject = useMemo(() => {
     return projects.find((project) => project.id === activeProjectId);
   }, [activeProjectId, projects]);
+  const isEmptyChat = activeView === "chat" && !messages.length;
   const projectChats = useMemo(
     () => savedChats
       .filter((chat) => activeProject ? chat.projectId === activeProject.id : !chat.projectId)
@@ -360,10 +478,6 @@ export const ChatPage = () => {
       );
     });
   }, [chatSearch, projectChats, projects]);
-  const recentChats = useMemo(
-    () => [...savedChats].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 3),
-    [savedChats]
-  );
   const sortedProjects = useMemo(
     () => [...projects].sort((a, b) => b.updatedAt - a.updatedAt),
     [projects]
@@ -393,7 +507,8 @@ export const ChatPage = () => {
     [activePromptModifierTitle]
   );
   const isWaitingForFirstToken = isLoading && loadingChatId === activeChatId && messages[messages.length - 1]?.role !== "assistant";
-  const activeTheme = THEME_OPTIONS.find((theme) => theme.id === themeId) || THEME_OPTIONS[0];
+  const themeOptions = useMemo(() => [...THEME_OPTIONS, customTheme], [customTheme]);
+  const activeTheme = themeId === "custom" ? customTheme : THEME_OPTIONS.find((theme) => theme.id === themeId) || THEME_OPTIONS[0];
   const themeStyle = {
     "--app-bg": activeTheme.appBg,
     "--sidebar-bg": activeTheme.sidebarBg,
@@ -401,8 +516,21 @@ export const ChatPage = () => {
     "--accent": activeTheme.accent,
     "--accent-to": activeTheme.accentTo,
     "--user-bubble": activeTheme.userBubble,
-    "--user-text": activeTheme.userText
+    "--user-text": activeTheme.userText,
+    "--ui-radius": `${activeTheme.radius}px`,
+    "--font-scale": String(activeTheme.fontScale),
+    "--input-width": `${activeTheme.inputWidth}px`
   } as CSSProperties;
+
+  const chatPath = (chat: Pick<SavedChat, "id" | "projectId">) => (
+    chat.projectId ? `/project/${chat.projectId}/chat/${chat.id}` : `/chat/${chat.id}`
+  );
+
+  const goToPath = (path: string, replace = false) => {
+    if (location.pathname !== path) {
+      navigate(path, { replace });
+    }
+  };
 
   const parseXPosts = (content: string): XPost[] => {
     const jsonText = content.match(/```json\s*([\s\S]*?)```/)?.[1] || content.match(/\[[\s\S]*\]/)?.[0] || content;
@@ -435,10 +563,86 @@ export const ChatPage = () => {
   }, [messages, isLoading]);
 
   useEffect(() => {
+    setCustomTheme((current) => sanitizeTheme(current));
+  }, []);
+
+  useEffect(() => {
+    routeSyncRef.current = true;
+    const normalizedPath = location.pathname.toLowerCase();
+    const routeChatId = params.chatId;
+    const routeProjectId = params.projectId;
+
+    if (normalizedPath === "/x") {
+      setActiveView("x");
+      setXScreen("feed");
+      routeSyncRef.current = false;
+      return;
+    }
+
+    setActiveView("chat");
+
+    if (routeChatId) {
+      const chat = savedChats.find((item) => item.id === routeChatId);
+      if (chat) {
+        skipNextChatSaveRef.current = true;
+        activeChatIdRef.current = chat.id;
+        setActiveProjectId(chat.projectId || "");
+        setActiveChatId(chat.id);
+        setMessages(chat.messages);
+        setInput("");
+      }
+      routeSyncRef.current = false;
+      return;
+    }
+
+    if (routeProjectId) {
+      const project = projects.find((item) => item.id === routeProjectId);
+      if (project) {
+        const nextChatId = crypto.randomUUID();
+        setActiveProjectId(project.id);
+        activeChatIdRef.current = nextChatId;
+        setActiveChatId(nextChatId);
+        setMessages([]);
+        setInput("");
+      }
+      routeSyncRef.current = false;
+      return;
+    }
+
+    if (normalizedPath === "/" || normalizedPath === "/chat") {
+      if (activeView === "chat" && !activeProjectId && !messages.length) {
+        routeSyncRef.current = false;
+        return;
+      }
+      const nextChatId = crypto.randomUUID();
+      setActiveProjectId("");
+      activeChatIdRef.current = nextChatId;
+      setActiveChatId(nextChatId);
+      setMessages([]);
+      setInput("");
+    }
+
+    routeSyncRef.current = false;
+  }, [location.pathname, params.chatId, params.projectId, projects, savedChats, activeView, activeProjectId, messages.length]);
+
+  useEffect(() => {
     if (!inputRef.current) return;
     inputRef.current.style.height = "44px";
     inputRef.current.style.height = `${Math.min(inputRef.current.scrollHeight, 220)}px`;
   }, [input]);
+
+  useEffect(() => {
+    if (!isPromptMenuOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!promptMenuRef.current?.contains(event.target as Node)) {
+        setIsPromptMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [isPromptMenuOpen]);
 
   useEffect(() => {
     localStorage.setItem("aether_saved_chats", JSON.stringify(savedChats));
@@ -493,10 +697,11 @@ export const ChatPage = () => {
     localStorage.setItem("openrouter_custom_model", customModel);
     localStorage.setItem("openrouter_use_custom_model", String(useCustomModel));
     localStorage.setItem("aether_theme", themeId);
+    localStorage.setItem("aether_custom_theme", JSON.stringify(customTheme));
     localStorage.setItem("aether_global_prompt", globalPrompt);
     localStorage.setItem("aether_prompt_modifier", activePromptModifierTitle);
     localStorage.setItem("aether_memory", assistantMemory);
-  }, [apiKey, selectedModel, customModel, useCustomModel, themeId, globalPrompt, activePromptModifierTitle, assistantMemory]);
+  }, [apiKey, selectedModel, customModel, useCustomModel, themeId, customTheme, globalPrompt, activePromptModifierTitle, assistantMemory]);
 
   useEffect(() => {
     localStorage.setItem("ai_x_user_name", xUserName);
@@ -585,6 +790,7 @@ export const ChatPage = () => {
     setActiveChatId(nextChatId);
     setMessages([]);
     setInput("");
+    goToPath("/");
   };
 
   const createNewProject = () => {
@@ -599,6 +805,7 @@ export const ChatPage = () => {
     setMessages([]);
     setInput("");
     setIsProjectOpen(true);
+    goToPath(`/project/${project.id}`);
   };
 
   const selectProject = (projectId: string) => {
@@ -610,6 +817,7 @@ export const ChatPage = () => {
     setActiveChatId(nextChatId);
     setMessages([]);
     setInput("");
+    goToPath(`/project/${projectId}`);
   };
 
   const selectNoProject = () => {
@@ -621,6 +829,7 @@ export const ChatPage = () => {
     setActiveChatId(nextChatId);
     setMessages([]);
     setInput("");
+    goToPath("/");
   };
 
   const deleteProject = (projectId: string) => {
@@ -648,6 +857,7 @@ export const ChatPage = () => {
     setActiveChatId(chat.id);
     setMessages(chat.messages);
     setInput("");
+    goToPath(chatPath(chat));
   };
 
   const deleteSavedChat = (chatId: string) => {
@@ -696,6 +906,7 @@ export const ChatPage = () => {
         customModel,
         useCustomModel,
         themeId,
+        customTheme,
         globalPrompt,
         activePromptModifierTitle,
         assistantMemory
@@ -736,6 +947,7 @@ export const ChatPage = () => {
         setCustomModel(payload.settings.customModel || "");
         setUseCustomModel(Boolean(payload.settings.useCustomModel));
         setThemeId(payload.settings.themeId || "aether");
+        setCustomTheme(sanitizeTheme(payload.settings.customTheme || {}));
         setGlobalPrompt(payload.settings.globalPrompt || DEFAULT_PROMPT);
         setActivePromptModifierTitle(payload.settings.activePromptModifierTitle || "");
         setAssistantMemory(payload.settings.assistantMemory || "");
@@ -763,6 +975,7 @@ export const ChatPage = () => {
 
   const generateXFeed = async () => {
     setActiveView("x");
+    goToPath("/x");
 
     if (!isXProfileReady) {
       return;
@@ -828,6 +1041,7 @@ export const ChatPage = () => {
   const exitX = () => {
     setActiveView("chat");
     setXScreen("feed");
+    goToPath("/");
   };
 
   const openXProfile = (post: XPost) => {
@@ -1200,6 +1414,7 @@ export const ChatPage = () => {
 
     setMessages(currentMessages);
     setInput("");
+    goToPath(targetProjectId ? `/project/${targetProjectId}/chat/${targetChatId}` : `/chat/${targetChatId}`, true);
     await streamAssistantReply(buildApiMessages(currentMessages), targetChatId, targetProjectId, currentMessages);
   };
 
@@ -1224,6 +1439,18 @@ export const ChatPage = () => {
     setActivePromptModifierTitle(title);
     setIsPromptMenuOpen(false);
     requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
+  const updateCustomTheme = (patch: Partial<ThemeConfig>) => {
+    setCustomTheme((current) => sanitizeTheme(patch, current));
+    setThemeId("custom");
+  };
+
+  const applyDesignFromMessage = (content: string) => {
+    const nextTheme = extractDesignTheme(content);
+    if (!nextTheme) return;
+
+    updateCustomTheme(nextTheme);
   };
 
   const editUserMessage = (index: number) => {
@@ -1256,7 +1483,7 @@ export const ChatPage = () => {
   };
 
   return (
-    <div style={themeStyle} className="flex h-screen bg-[var(--app-bg)] text-white font-sans overflow-hidden selection:bg-[var(--accent)]/30 selection:text-white">
+    <div style={themeStyle} className="flex h-screen bg-[var(--app-bg)] text-white font-sans overflow-hidden selection:bg-[var(--accent)]/30 selection:text-white text-[calc(1rem*var(--font-scale))]">
       {activeView === "chat" && <aside className="hidden md:flex w-80 flex-col border-r border-white/5 bg-[var(--sidebar-bg)] p-4">
         <div className="flex items-center gap-3 mb-8 px-2">
           <div className="w-8 h-8 rounded-lg bg-linear-to-tr from-[var(--accent)] to-[var(--accent-to)] flex items-center justify-center">
@@ -1377,7 +1604,7 @@ export const ChatPage = () => {
         </div>
       </aside>}
 
-      <main className="flex-1 flex flex-col relative bg-[var(--app-bg)] min-w-0">
+      <main className={`flex-1 relative bg-[var(--app-bg)] min-w-0 ${activeView === "chat" ? (isEmptyChat ? "flex flex-col overflow-hidden" : "overflow-y-auto custom-scrollbar") : "flex flex-col overflow-hidden"}`}>
         {activeView === "chat" && <header className="h-16 flex items-center justify-between px-6 border-b border-white/5 backdrop-blur-md bg-[var(--app-bg)]/50 sticky top-0 z-10">
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-sm font-medium text-white/80 truncate">{activeView === "x" ? "AI X" : activeProject?.name || "No Project"}</span>
@@ -1393,7 +1620,7 @@ export const ChatPage = () => {
           </div>
         </header>}
 
-        <div className={`flex-1 ${activeView === "x" ? "p-0" : "p-4 md:p-8 max-w-4xl mx-auto"} space-y-8 w-full ${activeView === "x" || messages.length ? "overflow-y-auto custom-scrollbar" : "overflow-hidden"}`}>
+        <div className={`${activeView === "x" ? "p-0" : isEmptyChat ? "flex flex-1 items-start justify-center p-4 pt-[31vh] md:p-8 md:pt-[31vh] max-w-4xl mx-auto" : "min-h-[calc(100vh-12rem)] p-4 md:p-8 max-w-4xl mx-auto pb-36"} space-y-8 w-full ${activeView === "x" ? "flex-1 overflow-y-auto custom-scrollbar" : ""}`}>
           {activeView === "x" ? (
             <div className="mx-auto w-full max-w-[1260px]">
               {!isXProfileReady && (
@@ -1720,38 +1947,8 @@ export const ChatPage = () => {
           ) : (
             <>
           {!messages.length && (
-            <div className="h-full min-h-[520px] flex flex-col items-center justify-center text-center">
+            <div className="flex flex-col items-center justify-center text-center">
               <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">С чего начнем?</h1>
-              <div className="mt-8 flex flex-wrap justify-center gap-2">
-                {activeProject ? (
-                  <button onClick={() => setIsProjectOpen(true)} className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 transition-colors text-sm text-white/80">
-                    <Folder className="w-4 h-4" />
-                    {activeProject.name || "Project"}
-                  </button>
-                ) : (
-                  <button onClick={createNewProject} className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 transition-colors text-sm text-white/80">
-                    <FolderPlus className="w-4 h-4" />
-                    Create Project
-                  </button>
-                )}
-                <button onClick={generateXFeed} className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 transition-colors text-sm text-white/80">
-                  <Hash className="w-4 h-4" />
-                  AI X
-                </button>
-              </div>
-              {!!recentChats.length && (
-                <div className="mt-6 w-full max-w-3xl text-left">
-                  <p className="mb-2 px-1 text-xs uppercase tracking-widest text-white/30">Recent chats</p>
-                  <div className="grid gap-2 md:grid-cols-3">
-                    {recentChats.map((chat) => (
-                      <button key={chat.id} onClick={() => openSavedChat(chat)} className="rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-left hover:bg-white/10">
-                        <p className="truncate text-sm text-white/80">{chat.title}</p>
-                        <p className="mt-1 text-[10px] text-white/30">{new Date(chat.updatedAt).toLocaleString()}</p>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
           )}
 
@@ -1791,7 +1988,7 @@ export const ChatPage = () => {
                         )
                       }}
                     >
-                      {message.content}
+                      {normalizeAssistantMarkdown(message.content)}
                     </ReactMarkdown>
                   ) : (
                     message.content
@@ -1833,6 +2030,18 @@ export const ChatPage = () => {
                       <span>Перегенерировать</span>
                     </button>
                   )}
+                  {message.role === "assistant" && extractDesignTheme(message.content) && (
+                    <button
+                      type="button"
+                      onClick={() => applyDesignFromMessage(message.content)}
+                      title="Применить дизайн"
+                      aria-label="Применить дизайн"
+                      className="message-action-button"
+                    >
+                      <Palette className="h-3.5 w-3.5" />
+                      <span>Применить дизайн</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1860,7 +2069,7 @@ export const ChatPage = () => {
           )}
         </div>
 
-        {activeView === "chat" && <div className="p-4 md:p-8 max-w-4xl mx-auto w-full">
+        {activeView === "chat" && <div className={`${isEmptyChat ? "absolute left-1/2 top-[41vh] -translate-x-1/2" : "sticky bottom-0"} z-20 bg-linear-to-t from-[var(--app-bg)] via-[var(--app-bg)] to-transparent p-4 md:p-8 mx-auto w-full max-w-[var(--input-width)]`}>
           {!!activeProject?.images.length && (
             <div className="mb-3 flex items-center gap-2 overflow-x-auto pb-1 custom-scrollbar">
               {activeProject.images.map((image) => (
@@ -1872,15 +2081,15 @@ export const ChatPage = () => {
           )}
           <div className="relative group">
             <div className="absolute -inset-1 bg-linear-to-r from-[var(--accent)]/20 to-[var(--accent-to)]/20 rounded-[2.5rem] blur-xl opacity-0 group-focus-within:opacity-100 transition-opacity" />
-            <div className="relative bg-white/5 backdrop-blur-2xl border border-white/10 rounded-[2rem] p-2 flex items-end gap-2 shadow-2xl transition-all duration-300 group-focus-within:border-white/20">
-              <div className="relative flex-shrink-0">
+            <div className="relative bg-white/5 backdrop-blur-2xl border border-white/10 rounded-[var(--ui-radius)] p-1.5 flex items-end gap-2 shadow-2xl transition-all duration-300 group-focus-within:border-white/20">
+              <div ref={promptMenuRef} className="relative flex-shrink-0">
                 <button
                   type="button"
                   onClick={() => setIsPromptMenuOpen((current) => !current)}
-                  className="p-3 rounded-full text-white/50 hover:bg-white/10 hover:text-white transition-colors"
+                  className="flex h-10 w-10 items-center justify-center rounded-full text-white/50 hover:bg-white/10 hover:text-white transition-colors"
                   title="Открыть модиферы"
                 >
-                  <Plus className="w-5 h-5" />
+                  <Plus className="h-5 w-5" />
                 </button>
                 {isPromptMenuOpen && (
                   <div className="absolute bottom-full left-0 z-30 mb-3 w-80 overflow-hidden rounded-2xl border border-white/10 bg-[#2f2f2f] p-2 shadow-2xl">
@@ -1889,10 +2098,6 @@ export const ChatPage = () => {
                       Добавить файлы в проект
                     </button>
                     <div className="my-1 h-px bg-white/10" />
-                    <button onClick={() => { setActivePromptModifierTitle(""); setIsPromptMenuOpen(false); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm text-white/90 hover:bg-white/10">
-                      <CircleEllipsis className="h-5 w-5 text-white/70" />
-                      Без модифера
-                    </button>
                     {PROMPT_TEMPLATES.map((template) => (
                       <button key={template.title} onClick={() => applyPromptTemplate(template.title)} className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm hover:bg-white/10 ${activePromptModifierTitle === template.title ? "bg-white/10 text-white" : "text-white/90"}`}>
                         <WandSparkles className="h-5 w-5 text-white/70" />
@@ -1908,26 +2113,24 @@ export const ChatPage = () => {
                 )}
               </div>
               <div className="min-w-0 flex-1">
-                {activePromptModifier && (
-                  <div className="mb-1 flex items-center gap-2 px-4">
-                    <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--accent)]/30 bg-[var(--accent)]/15 px-2.5 py-1 text-xs text-white/75">
-                      <WandSparkles className="h-3 w-3 text-[var(--accent)]" />
-                      {activePromptModifier.title}
-                    </span>
-                    <button onClick={() => setActivePromptModifierTitle("")} className="text-xs text-white/35 hover:text-white">
-                      убрать
-                    </button>
-                  </div>
-                )}
                 <textarea
                   ref={inputRef}
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
                   onKeyDown={(event) => event.key === "Enter" && !event.shiftKey && (event.preventDefault(), handleSend())}
                   placeholder={apiKey ? `Message ${activeName}...` : "Please set API Key in settings..."}
-                  className="w-full bg-transparent border-none focus:ring-0 focus:outline-none text-white placeholder:text-white/20 py-3 px-4 resize-none max-h-[220px] min-h-[44px] text-base md:text-lg overflow-y-auto custom-scrollbar break-words [overflow-wrap:anywhere]"
+                  className="w-full bg-transparent border-none focus:ring-0 focus:outline-none text-white placeholder:text-white/20 py-2.5 px-3 resize-none max-h-[220px] min-h-[40px] text-base overflow-y-auto custom-scrollbar break-words [overflow-wrap:anywhere]"
                   rows={1}
                 />
+                {activePromptModifier && (
+                  <div className="flex items-center gap-2 px-3 pb-1 text-sm">
+                    <button onClick={() => setActivePromptModifierTitle("")} className="inline-flex h-5 w-5 items-center justify-center rounded-full text-white/65 hover:bg-white/10 hover:text-white" title="Убрать модифер" aria-label="Убрать модифер">
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                    <WandSparkles className="h-4 w-4 text-[var(--accent)]" />
+                    <span className="text-[var(--accent)]">{activePromptModifier.title}</span>
+                  </div>
+                )}
               </div>
 
               {isLoading && loadingChatId === activeChatId ? (
@@ -2082,13 +2285,53 @@ export const ChatPage = () => {
                     <Palette className="w-3 h-3" /> Theme
                   </label>
                   <div className="grid grid-cols-2 gap-2">
-                    {THEME_OPTIONS.map((theme) => (
+                    {themeOptions.map((theme) => (
                       <button key={theme.id} onClick={() => setThemeId(theme.id)} className={`flex items-center gap-3 rounded-2xl border p-3 text-left transition-colors ${theme.id === themeId ? "border-white/30 bg-white/10" : "border-white/10 bg-white/5 hover:bg-white/10"}`}>
                         <span className="h-5 w-5 rounded-full" style={{ background: `linear-gradient(135deg, ${theme.accent}, ${theme.accentTo})` }} />
                         <span className="text-sm text-white/70">{theme.label}</span>
                       </button>
                     ))}
                   </div>
+                </div>
+
+                <div className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="text-[10px] uppercase tracking-widest font-bold text-white/40 flex items-center gap-2">
+                      <Palette className="w-3 h-3" /> Custom design controls
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => { setCustomTheme(DEFAULT_CUSTOM_THEME); setThemeId("aether"); }} className="rounded-full border border-white/10 px-3 py-1 text-xs text-white/60 hover:bg-white/10 hover:text-white">Reset</button>
+                      <button onClick={() => setThemeId("custom")} className="rounded-full border border-white/10 px-3 py-1 text-xs text-white/60 hover:bg-white/10 hover:text-white">Use Custom</button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    {([
+                      ["appBg", "App"],
+                      ["sidebarBg", "Sidebar"],
+                      ["panelBg", "Panel"],
+                      ["accent", "Accent"],
+                      ["accentTo", "Accent 2"],
+                      ["userBubble", "User bubble"],
+                      ["userText", "User text"]
+                    ] as Array<[keyof ThemeConfig, string]>).map(([key, label]) => (
+                      <label key={key} className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/20 p-2 text-xs text-white/55">
+                        {label}
+                        <input type="color" value={String(customTheme[key])} onChange={(event) => updateCustomTheme({ [key]: event.target.value } as Partial<ThemeConfig>)} className="h-7 w-9 rounded border-0 bg-transparent" />
+                      </label>
+                    ))}
+                  </div>
+                  <label className="block text-xs text-white/45">
+                    Radius {customTheme.radius}px
+                    <input type="range" min="10" max="42" value={customTheme.radius} onChange={(event) => updateCustomTheme({ radius: Number(event.target.value) })} className="mt-2 w-full accent-[var(--accent)]" />
+                  </label>
+                  <label className="block text-xs text-white/45">
+                    Font scale {customTheme.fontScale.toFixed(2)}
+                    <input type="range" min="0.9" max="1.15" step="0.01" value={customTheme.fontScale} onChange={(event) => updateCustomTheme({ fontScale: Number(event.target.value) })} className="mt-2 w-full accent-[var(--accent)]" />
+                  </label>
+                  <label className="block text-xs text-white/45">
+                    Input width {customTheme.inputWidth}px
+                    <input type="range" min="640" max="1120" step="16" value={customTheme.inputWidth} onChange={(event) => updateCustomTheme({ inputWidth: Number(event.target.value) })} className="mt-2 w-full accent-[var(--accent)]" />
+                  </label>
                 </div>
 
                 <button onClick={() => setIsSettingsOpen(false)} className="w-full py-4 bg-white text-black font-bold rounded-2xl hover:bg-gray-200 transition-colors mt-4">
