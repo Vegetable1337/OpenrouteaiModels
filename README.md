@@ -1,5 +1,15 @@
 # Ai X and ChatBot
 
+## One-click Windows start
+
+Double-click:
+
+```text
+START_AETHER.bat
+```
+
+The script checks Node.js and Docker, creates `.env`, asks for the OpenRouter key if needed, installs npm dependencies, starts SearXNG/FastAPI with Docker, starts the Vite frontend, and opens the app.
+
 Choose language: [Русский](#русский) | [English](#english)
 
 ## Русский
