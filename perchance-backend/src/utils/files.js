@@ -26,4 +26,15 @@ async function appendHistory(entry) {
   await fsp.appendFile(historyPath, `${JSON.stringify(entry)}\n`, "utf8");
 }
 
-module.exports = { appendHistory, ensureGeneratedDir, safeImageName };
+async function listGeneratedImages() {
+  ensureGeneratedDir();
+
+  const entries = await fsp.readdir(path.resolve(config.generatedDir), { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile() && /\.(png|jpe?g|webp|gif)$/i.test(entry.name))
+    .map((entry) => entry.name)
+    .sort()
+    .reverse();
+}
+
+module.exports = { appendHistory, ensureGeneratedDir, listGeneratedImages, safeImageName };

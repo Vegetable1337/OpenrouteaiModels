@@ -66,6 +66,7 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   images?: LocalImage[];
+  generatedImageUrl?: string;
   sources?: WebSource[];
 }
 
@@ -199,6 +200,8 @@ const DEFAULT_PROMPT = "You are Aether, a helpful local AI assistant. Answer cle
 const PROJECT_FALLBACK_PROMPT = "Use the active project's name, instructions, files, and chat history as context. If project files are attached, use them only when relevant.";
 const IMPORTABLE_TEXT_EXTENSIONS = [".txt", ".md", ".json", ".csv", ".ts", ".tsx"];
 const LOCAL_SEARCH_CHAT_URL = "http://localhost:8000/chat";
+const LOCAL_IMAGE_GENERATE_URL = "http://localhost:3001/generate";
+const IMAGE_GENERATION_MODIFIER_TITLE = "Генерация картинок";
 const PROMPT_TEMPLATES = [
   {
     title: "Код-ревью",
@@ -221,7 +224,7 @@ const PROMPT_TEMPLATES = [
     prompt: "Act as a project assistant. Use project instructions, files, and chat history to plan work, track decisions, summarize context, and propose next actions."
   },
   {
-    title: "Генерация картинок",
+    title: IMAGE_GENERATION_MODIFIER_TITLE,
     prompt: "Act as an image generation prompt assistant for the local Perchance image backend. When the user wants an image, turn their idea into one concise, vivid image prompt in English unless they ask for another language. Include subject, style, composition, lighting, mood, colors, camera/medium, and important details. Do not answer with a long explanation. If the user gives only a rough idea, produce a ready-to-send prompt. If the user asks to generate through the app, tell them to send the final prompt to the local image endpoint POST http://localhost:3001/generate with JSON {\"prompt\":\"...\"}. Avoid unsafe or copyrighted living-artist imitation requests; offer a safer style description instead."
   },
   {
@@ -1587,6 +1590,85 @@ export const ChatPage = () => {
     }
   };
 
+  const generateImageReply = async (
+    prompt: string,
+    targetChatId: string,
+    targetProjectId: string | null,
+    baseMessages: Message[]
+  ) => {
+    const controller = new AbortController();
+
+    abortControllerRef.current = controller;
+    setIsLoading(true);
+    setLoadingChatId(targetChatId);
+    setGenerationStatus(`Генерирую картинку: ${getShortStatusQuery(prompt)}`);
+
+    let nextMessages: Message[] = [...baseMessages];
+
+    const syncTargetChat = (messagesToSync: Message[]) => {
+      nextMessages = messagesToSync;
+      saveChatById(targetChatId, targetProjectId, messagesToSync);
+
+      if (activeChatIdRef.current === targetChatId) {
+        setMessages(messagesToSync);
+      }
+    };
+
+    try {
+      syncTargetChat([...nextMessages, { role: "assistant", content: "" }]);
+
+      const response = await fetch(LOCAL_IMAGE_GENERATE_URL, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ prompt })
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok || !data?.success || !data?.imageUrl) {
+        throw new Error(data?.error || "Perchance image backend did not return an image.");
+      }
+
+      const generatedMessage: Message = {
+        role: "assistant",
+        content: `Готово. Prompt: ${data.prompt || prompt}`,
+        generatedImageUrl: data.imageUrl
+      };
+      const messagesWithImage = [...nextMessages];
+      messagesWithImage[messagesWithImage.length - 1] = generatedMessage;
+      syncTargetChat(messagesWithImage);
+    } catch (error: any) {
+      if (error.name === "AbortError") {
+        syncTargetChat(nextMessages.filter((message) => message.content.trim() || message.generatedImageUrl || message.role !== "assistant"));
+        return;
+      }
+
+      const errorMessage = [
+        `Ошибка генерации картинки: ${error.message || "не удалось подключиться к Perchance backend."}`,
+        "Проверь, что запущен http://localhost:3001. Если Perchance просит проверку, поставь PERCHANCE_HEADLESS=false в perchance-backend\\.env, перезапусти и пройди проверку в открывшемся браузере."
+      ].join("\n\n");
+      const messagesWithError = [...nextMessages];
+      const lastMessage = messagesWithError[messagesWithError.length - 1];
+
+      if (lastMessage?.role === "assistant" && !lastMessage.content && !lastMessage.generatedImageUrl) {
+        messagesWithError[messagesWithError.length - 1] = { ...lastMessage, content: errorMessage };
+        syncTargetChat(messagesWithError);
+      } else {
+        syncTargetChat([...messagesWithError, { role: "assistant", content: errorMessage }]);
+      }
+    } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+      }
+      setGenerationStatus("");
+      setIsLoading(false);
+      setLoadingChatId((current) => current === targetChatId ? null : current);
+    }
+  };
+
   const stopGeneration = () => {
     abortControllerRef.current?.abort();
   };
@@ -1594,7 +1676,9 @@ export const ChatPage = () => {
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
 
-    if (!apiKey) {
+    const shouldGenerateImage = activePromptModifierTitle === IMAGE_GENERATION_MODIFIER_TITLE;
+
+    if (!shouldGenerateImage && !apiKey) {
       setIsSettingsOpen(true);
       return;
     }
@@ -1611,6 +1695,12 @@ export const ChatPage = () => {
     setMessages(currentMessages);
     setInput("");
     goToPath(targetProjectId ? `/project/${targetProjectId}/chat/${targetChatId}` : `/chat/${targetChatId}`, true);
+
+    if (shouldGenerateImage) {
+      await generateImageReply(input, targetChatId, targetProjectId, currentMessages);
+      return;
+    }
+
     await streamAssistantReply(buildApiMessages(currentMessages), targetChatId, targetProjectId, currentMessages, isWebSearchEnabled);
   };
 
@@ -2191,7 +2281,7 @@ export const ChatPage = () => {
           )}
 
           {messages.map((message, index) => {
-            if (message.role === "assistant" && !message.content.trim() && !message.images?.length) return null;
+            if (message.role === "assistant" && !message.content.trim() && !message.images?.length && !message.generatedImageUrl) return null;
             const isEditingThisMessage = editingMessageIndex === index && message.role === "user";
 
             return (
@@ -2208,6 +2298,15 @@ export const ChatPage = () => {
                     {message.images.slice(0, 4).map((image) => (
                       <img key={image.id} src={image.dataUrl} alt={image.name} className="h-28 w-full rounded-2xl object-cover border border-white/10" />
                     ))}
+                  </div>
+                )}
+                {message.generatedImageUrl && (
+                  <div className="overflow-hidden rounded-[2rem] border border-white/10 bg-white/[0.03]">
+                    <img
+                      src={message.generatedImageUrl}
+                      alt={message.content || "Generated image"}
+                      className="max-h-[70vh] w-full object-contain bg-black/25"
+                    />
                   </div>
                 )}
                 {isEditingThisMessage ? (
