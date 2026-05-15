@@ -270,6 +270,7 @@ export const ChatPage = () => {
   const [loadingChatId, setLoadingChatId] = useState<string | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isProjectOpen, setIsProjectOpen] = useState(false);
+  const [isPromptMenuOpen, setIsPromptMenuOpen] = useState(false);
   const [isDraggingImages, setIsDraggingImages] = useState(false);
   const [activeView, setActiveView] = useState<"chat" | "x">("chat");
   const [xPosts, setXPosts] = useState<XPost[]>([]);
@@ -1207,6 +1208,12 @@ export const ChatPage = () => {
     }
   };
 
+  const applyPromptTemplate = (prompt: string) => {
+    setInput((current) => current.trim() ? `${current.trim()}\n\n${prompt}` : prompt);
+    setIsPromptMenuOpen(false);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
   const editUserMessage = (index: number) => {
     const message = messages[index];
     if (!message || message.role !== "user" || isLoading) return;
@@ -1256,6 +1263,11 @@ export const ChatPage = () => {
           <span className="text-sm font-medium">New Project</span>
         </button>
 
+        <div className="mt-3 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2">
+          <Search className="h-4 w-4 text-white/35" />
+          <input value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Search chats" className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/25" />
+        </div>
+
         <button onClick={generateXFeed} className={`flex items-center gap-3 w-full p-3 rounded-2xl transition-all border border-white/10 mt-3 group ${activeView === "x" ? "bg-white/10" : "bg-white/5 hover:bg-white/10"}`}>
           <Hash className="w-5 h-5 text-white/60 group-hover:text-white" />
           <span className="text-sm font-medium">AI X</span>
@@ -1304,11 +1316,6 @@ export const ChatPage = () => {
           <div className="flex items-center justify-between mt-6 mb-2 px-3">
             <p className="text-[10px] uppercase tracking-widest text-white/30 font-bold">{activeProject ? "Chats in Project" : "Chats"}</p>
             <span className="text-[10px] text-white/30">{filteredProjectChats.length}</span>
-          </div>
-
-          <div className="mb-3 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2">
-            <Search className="h-4 w-4 text-white/35" />
-            <input value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Search chats" className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/25" />
           </div>
 
           <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2 pr-1">
@@ -1715,22 +1722,10 @@ export const ChatPage = () => {
                     Create Project
                   </button>
                 )}
-                <button onClick={() => setIsSettingsOpen(true)} className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 transition-colors text-sm text-white/80">
-                  <WandSparkles className="w-4 h-4" />
-                  Prompt Library
-                </button>
                 <button onClick={generateXFeed} className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 transition-colors text-sm text-white/80">
                   <Hash className="w-4 h-4" />
                   AI X
                 </button>
-              </div>
-              <div className="mt-8 grid w-full max-w-3xl gap-3 md:grid-cols-3">
-                {PROMPT_TEMPLATES.slice(0, 3).map((template) => (
-                  <button key={template.title} onClick={() => setInput(template.prompt)} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-left hover:bg-white/10">
-                    <p className="font-semibold">{template.title}</p>
-                    <p className="mt-2 line-clamp-3 text-xs text-white/40">{template.prompt}</p>
-                  </button>
-                ))}
               </div>
               {!!recentChats.length && (
                 <div className="mt-6 w-full max-w-3xl text-left">
@@ -1866,6 +1861,36 @@ export const ChatPage = () => {
           <div className="relative group">
             <div className="absolute -inset-1 bg-linear-to-r from-[var(--accent)]/20 to-[var(--accent-to)]/20 rounded-[2.5rem] blur-xl opacity-0 group-focus-within:opacity-100 transition-opacity" />
             <div className="relative bg-white/5 backdrop-blur-2xl border border-white/10 rounded-[2rem] p-2 flex items-end gap-2 shadow-2xl transition-all duration-300 group-focus-within:border-white/20">
+              <div className="relative flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setIsPromptMenuOpen((current) => !current)}
+                  className="p-3 rounded-full text-white/50 hover:bg-white/10 hover:text-white transition-colors"
+                  title="Открыть модиферы"
+                >
+                  <Plus className="w-5 h-5" />
+                </button>
+                {isPromptMenuOpen && (
+                  <div className="absolute bottom-full left-0 z-30 mb-3 w-80 overflow-hidden rounded-2xl border border-white/10 bg-[#2f2f2f] p-2 shadow-2xl">
+                    <button onClick={() => { setIsPromptMenuOpen(false); activeProject ? setIsProjectOpen(true) : createNewProject(); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm text-white/90 hover:bg-white/10">
+                      <ImagePlus className="h-5 w-5 text-white/70" />
+                      Добавить файлы в проект
+                    </button>
+                    <div className="my-1 h-px bg-white/10" />
+                    {PROMPT_TEMPLATES.map((template) => (
+                      <button key={template.title} onClick={() => applyPromptTemplate(template.prompt)} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm text-white/90 hover:bg-white/10">
+                        <WandSparkles className="h-5 w-5 text-white/70" />
+                        <span>{template.title}</span>
+                      </button>
+                    ))}
+                    <div className="my-1 h-px bg-white/10" />
+                    <button onClick={() => { setIsPromptMenuOpen(false); createNewProject(); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm text-white/90 hover:bg-white/10">
+                      <FolderPlus className="h-5 w-5 text-white/70" />
+                      Проекты
+                    </button>
+                  </div>
+                )}
+              </div>
               <textarea
                 ref={inputRef}
                 value={input}
