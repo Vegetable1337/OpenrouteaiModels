@@ -129,6 +129,31 @@ if (Test-Path "package-lock.json") {
 }
 Write-Ok "Frontend dependencies are ready"
 
+Write-Step "Preparing Perchance image backend"
+$perchanceRoot = Join-Path $Root "perchance-backend"
+if (Test-Path $perchanceRoot) {
+  Push-Location $perchanceRoot
+  try {
+    if (-not (Test-Path ".env")) {
+      Copy-Item ".env.example" ".env"
+      Write-Ok "Perchance .env created from .env.example"
+    } else {
+      Write-Ok "Perchance .env already exists"
+    }
+
+    if (Test-Path "package-lock.json") {
+      npm.cmd ci
+    } else {
+      npm.cmd install
+    }
+    Write-Ok "Perchance dependencies are ready"
+  } finally {
+    Pop-Location
+  }
+} else {
+  Write-Warn "perchance-backend folder was not found. Image generation backend will not start."
+}
+
 Write-Step "Starting SearXNG and FastAPI backend"
 docker compose up -d --build
 Write-Ok "Docker services started"
@@ -145,6 +170,18 @@ if (Wait-Http "http://localhost:8080" 80) {
   Write-Ok "SearXNG is ready: http://localhost:8080"
 } else {
   Write-Warn "SearXNG did not answer in time. It can still finish loading in Docker."
+}
+
+if (Test-Path $perchanceRoot) {
+  Write-Step "Starting Perchance image backend"
+  $perchanceCommand = "cd /d `"$perchanceRoot`" && npm.cmd start"
+  Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $perchanceCommand -WorkingDirectory $perchanceRoot
+
+  if (Wait-Http "http://localhost:3001/health" 60) {
+    Write-Ok "Perchance image backend is ready: http://localhost:3001"
+  } else {
+    Write-Warn "Perchance image backend did not answer yet. If Perchance asks for verification, set PERCHANCE_HEADLESS=false in perchance-backend\.env and restart."
+  }
 }
 
 Write-Step "Starting frontend"
@@ -164,3 +201,4 @@ Write-Host "Aether is running." -ForegroundColor Green
 Write-Host "Frontend: http://127.0.0.1:5173"
 Write-Host "Backend:  http://localhost:8000"
 Write-Host "SearXNG:  http://localhost:8080"
+Write-Host "Images:   http://localhost:3001"

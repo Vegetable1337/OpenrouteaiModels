@@ -1,0 +1,24 @@
+{
+  "name": "aether-perchance-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Express backend for generating images through perchance.org and saving them locally.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node --check src/server.js && node --check src/app.js && node --check src/routes/generateRoutes.js && node --check src/services/perchanceService.js && node --check src/utils/files.js && node --check src/utils/logger.js && node --check src/utils/retry.js"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "helmet": "^8.0.0",
+    "morgan": "^1.10.0",
+    "puppeteer": "^25.0.2"
+  }
+}
