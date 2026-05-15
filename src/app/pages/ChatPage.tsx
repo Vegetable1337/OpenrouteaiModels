@@ -301,6 +301,7 @@ export const ChatPage = () => {
   const [useCustomModel, setUseCustomModel] = useState(() => localStorage.getItem("openrouter_use_custom_model") === "true");
   const [themeId, setThemeId] = useState(() => localStorage.getItem("aether_theme") || "aether");
   const [globalPrompt, setGlobalPrompt] = useState(() => localStorage.getItem("aether_global_prompt") || DEFAULT_PROMPT);
+  const [activePromptModifierTitle, setActivePromptModifierTitle] = useState(() => localStorage.getItem("aether_prompt_modifier") || "");
   const [assistantMemory, setAssistantMemory] = useState(() => localStorage.getItem("aether_memory") || "");
   const [chatSearch, setChatSearch] = useState("");
   const [xTopic, setXTopic] = useState(() => localStorage.getItem("ai_x_topic") || "");
@@ -387,6 +388,10 @@ export const ChatPage = () => {
   const isXProfileReady = Boolean(xUserName.trim() && normalizeHandle(xUserHandle));
   const effectiveModel = useCustomModel && customModel.trim() ? customModel.trim() : selectedModel;
   const activeName = activeProject?.assistantName?.trim() || "Aether";
+  const activePromptModifier = useMemo(
+    () => PROMPT_TEMPLATES.find((template) => template.title === activePromptModifierTitle),
+    [activePromptModifierTitle]
+  );
   const isWaitingForFirstToken = isLoading && loadingChatId === activeChatId && messages[messages.length - 1]?.role !== "assistant";
   const activeTheme = THEME_OPTIONS.find((theme) => theme.id === themeId) || THEME_OPTIONS[0];
   const themeStyle = {
@@ -489,8 +494,9 @@ export const ChatPage = () => {
     localStorage.setItem("openrouter_use_custom_model", String(useCustomModel));
     localStorage.setItem("aether_theme", themeId);
     localStorage.setItem("aether_global_prompt", globalPrompt);
+    localStorage.setItem("aether_prompt_modifier", activePromptModifierTitle);
     localStorage.setItem("aether_memory", assistantMemory);
-  }, [apiKey, selectedModel, customModel, useCustomModel, themeId, globalPrompt, assistantMemory]);
+  }, [apiKey, selectedModel, customModel, useCustomModel, themeId, globalPrompt, activePromptModifierTitle, assistantMemory]);
 
   useEffect(() => {
     localStorage.setItem("ai_x_user_name", xUserName);
@@ -515,14 +521,18 @@ export const ChatPage = () => {
     const memoryBlock = assistantMemory.trim()
       ? `Memory about the user and preferences:\n${assistantMemory.trim()}`
       : "";
+    const promptModifierBlock = activePromptModifier
+      ? `Active mode / prompt modifier (${activePromptModifier.title}):\n${activePromptModifier.prompt}`
+      : "";
 
     if (!activeProject) {
-      return [globalPrompt.trim() || DEFAULT_PROMPT, memoryBlock].filter(Boolean).join("\n\n");
+      return [globalPrompt.trim() || DEFAULT_PROMPT, memoryBlock, promptModifierBlock].filter(Boolean).join("\n\n");
     }
 
     return [
       globalPrompt.trim() || DEFAULT_PROMPT,
       memoryBlock,
+      promptModifierBlock,
       `Project: ${activeProject.name.trim() || "Custom Project"}`,
       `Assistant name in this project: ${activeProject.assistantName?.trim() || "Aether"}`,
       activeProject.prompt.trim() ? `Project instructions:\n${activeProject.prompt.trim()}` : PROJECT_FALLBACK_PROMPT,
@@ -687,6 +697,7 @@ export const ChatPage = () => {
         useCustomModel,
         themeId,
         globalPrompt,
+        activePromptModifierTitle,
         assistantMemory
       },
       aiX: {
@@ -726,6 +737,7 @@ export const ChatPage = () => {
         setUseCustomModel(Boolean(payload.settings.useCustomModel));
         setThemeId(payload.settings.themeId || "aether");
         setGlobalPrompt(payload.settings.globalPrompt || DEFAULT_PROMPT);
+        setActivePromptModifierTitle(payload.settings.activePromptModifierTitle || "");
         setAssistantMemory(payload.settings.assistantMemory || "");
       }
 
@@ -1208,8 +1220,8 @@ export const ChatPage = () => {
     }
   };
 
-  const applyPromptTemplate = (prompt: string) => {
-    setInput((current) => current.trim() ? `${current.trim()}\n\n${prompt}` : prompt);
+  const applyPromptTemplate = (title: string) => {
+    setActivePromptModifierTitle(title);
     setIsPromptMenuOpen(false);
     requestAnimationFrame(() => inputRef.current?.focus());
   };
@@ -1877,8 +1889,12 @@ export const ChatPage = () => {
                       Добавить файлы в проект
                     </button>
                     <div className="my-1 h-px bg-white/10" />
+                    <button onClick={() => { setActivePromptModifierTitle(""); setIsPromptMenuOpen(false); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm text-white/90 hover:bg-white/10">
+                      <CircleEllipsis className="h-5 w-5 text-white/70" />
+                      Без модифера
+                    </button>
                     {PROMPT_TEMPLATES.map((template) => (
-                      <button key={template.title} onClick={() => applyPromptTemplate(template.prompt)} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm text-white/90 hover:bg-white/10">
+                      <button key={template.title} onClick={() => applyPromptTemplate(template.title)} className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm hover:bg-white/10 ${activePromptModifierTitle === template.title ? "bg-white/10 text-white" : "text-white/90"}`}>
                         <WandSparkles className="h-5 w-5 text-white/70" />
                         <span>{template.title}</span>
                       </button>
@@ -1891,15 +1907,28 @@ export const ChatPage = () => {
                   </div>
                 )}
               </div>
-              <textarea
-                ref={inputRef}
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                onKeyDown={(event) => event.key === "Enter" && !event.shiftKey && (event.preventDefault(), handleSend())}
-                placeholder={apiKey ? `Message ${activeName}...` : "Please set API Key in settings..."}
-                className="flex-1 bg-transparent border-none focus:ring-0 focus:outline-none text-white placeholder:text-white/20 py-3 px-4 resize-none max-h-[220px] min-h-[44px] text-base md:text-lg overflow-y-auto custom-scrollbar break-words [overflow-wrap:anywhere]"
-                rows={1}
-              />
+              <div className="min-w-0 flex-1">
+                {activePromptModifier && (
+                  <div className="mb-1 flex items-center gap-2 px-4">
+                    <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--accent)]/30 bg-[var(--accent)]/15 px-2.5 py-1 text-xs text-white/75">
+                      <WandSparkles className="h-3 w-3 text-[var(--accent)]" />
+                      {activePromptModifier.title}
+                    </span>
+                    <button onClick={() => setActivePromptModifierTitle("")} className="text-xs text-white/35 hover:text-white">
+                      убрать
+                    </button>
+                  </div>
+                )}
+                <textarea
+                  ref={inputRef}
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={(event) => event.key === "Enter" && !event.shiftKey && (event.preventDefault(), handleSend())}
+                  placeholder={apiKey ? `Message ${activeName}...` : "Please set API Key in settings..."}
+                  className="w-full bg-transparent border-none focus:ring-0 focus:outline-none text-white placeholder:text-white/20 py-3 px-4 resize-none max-h-[220px] min-h-[44px] text-base md:text-lg overflow-y-auto custom-scrollbar break-words [overflow-wrap:anywhere]"
+                  rows={1}
+                />
+              </div>
 
               {isLoading && loadingChatId === activeChatId ? (
                 <button onClick={stopGeneration} className="p-3 rounded-full bg-white text-black transition-all flex items-center justify-center shadow-[0_0_20px_rgba(255,255,255,0.3)]" title="Stop generation">
