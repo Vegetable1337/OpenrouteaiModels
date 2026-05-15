@@ -29,7 +29,7 @@ const config = {
     verifyUrl: "https://image-generation.perchance.org/api/checkVerificationStatus",
     verifyUserUrl: "https://image-generation.perchance.org/api/verifyUser",
     pageUrl: "https://perchance.org/ai-text-to-image-generator",
-    headless: (process.env.PERCHANCE_HEADLESS || "true").toLowerCase() !== "false",
+    headless: (process.env.PERCHANCE_HEADLESS || "false").toLowerCase() !== "false",
     userDataDir: process.env.PERCHANCE_USER_DATA_DIR || ".perchance-profile",
     verificationTimeoutMs: numberFromEnv("PERCHANCE_VERIFICATION_TIMEOUT_MS", 120000, 15000, 600000)
   },

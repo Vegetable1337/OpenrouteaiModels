@@ -50,6 +50,28 @@ function Install-NodeDependencies {
   }
 }
 
+function Set-EnvValue {
+  param(
+    [string]$Path,
+    [string]$Name,
+    [string]$Value
+  )
+
+  $line = "$Name=$Value"
+  if (-not (Test-Path $Path)) {
+    Set-Content $Path $line -Encoding UTF8
+    return
+  }
+
+  $text = Get-Content $Path -Raw
+  if ($text -match "(?m)^$([regex]::Escape($Name))=") {
+    $text = $text -replace "(?m)^$([regex]::Escape($Name))=.*$", $line
+    Set-Content $Path $text -Encoding UTF8
+  } else {
+    Add-Content $Path $line -Encoding UTF8
+  }
+}
+
 function Stop-ProjectNodeProcesses {
   param([string]$ProjectPath)
 
@@ -187,6 +209,9 @@ if (Test-Path $perchanceRoot) {
     } else {
       Write-Ok "Perchance .env already exists"
     }
+
+    Set-EnvValue ".env" "PERCHANCE_HEADLESS" "false"
+    Write-Ok "Perchance verification browser is enabled"
 
     Install-NodeDependencies $perchanceRoot
     Write-Ok "Perchance dependencies are ready"

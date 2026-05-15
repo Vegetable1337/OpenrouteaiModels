@@ -6,6 +6,7 @@ const path = require("path");
 
 const generateRoutes = require("./routes/generateRoutes");
 const { config } = require("./config");
+const { getVerificationStatus, openVerificationBrowser } = require("./services/perchanceService");
 const { ensureGeneratedDir, listGeneratedImages } = require("./utils/files");
 
 function createApp() {
@@ -28,6 +29,47 @@ function createApp() {
 
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: "aether-perchance-backend" });
+  });
+
+  app.get("/verify", async (_req, res, next) => {
+    try {
+      const result = await openVerificationBrowser();
+      res.type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Perchance Verification</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; background: #090909; color: #f5f5f5; }
+    body { display: grid; min-height: 100vh; margin: 0; place-items: center; background: #090909; }
+    main { width: min(680px, calc(100vw - 32px)); border: 1px solid #2a2a2a; border-radius: 24px; background: #121212; padding: 28px; }
+    h1 { margin: 0 0 12px; font-size: 28px; }
+    p { color: #d4d4d8; line-height: 1.6; }
+    a { color: #a78bfa; }
+    code { border: 1px solid #333; border-radius: 8px; background: #050505; padding: 2px 6px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Perchance verification</h1>
+    <p>${result.message}</p>
+    <p>After verification, return to Aether Chat and send the image request again.</p>
+    <p>Status endpoint: <a href="/verify/status"><code>/verify/status</code></a></p>
+  </main>
+</body>
+</html>`);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/verify/status", async (_req, res, next) => {
+    try {
+      res.json(await getVerificationStatus());
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get("/", async (_req, res, next) => {

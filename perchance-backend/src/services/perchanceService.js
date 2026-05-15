@@ -10,6 +10,8 @@ const { logger } = require("../utils/logger");
 const { retry } = require("../utils/retry");
 
 let cachedUserKey = "";
+let verificationBrowser = null;
+let verificationPage = null;
 
 const http = axios.create({
   timeout: config.requestTimeoutMs,
@@ -123,6 +125,62 @@ async function extractUserKeyWithPuppeteer() {
   }
 }
 
+async function openVerificationBrowser() {
+  if (config.perchance.headless) {
+    throw makeError("Visible verification is disabled. Set PERCHANCE_HEADLESS=false and restart the backend.", 400);
+  }
+
+  if (verificationBrowser && verificationPage && !verificationPage.isClosed()) {
+    await verificationPage.bringToFront();
+    return {
+      opened: false,
+      message: "Verification browser is already open. Complete Perchance/Cloudflare verification there, then retry generation."
+    };
+  }
+
+  verificationBrowser = await launchBrowser();
+  verificationPage = await verificationBrowser.newPage();
+  await verificationPage.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+  );
+  await verificationPage.goto(config.perchance.pageUrl, {
+    waitUntil: "domcontentloaded",
+    timeout: config.requestTimeoutMs
+  });
+
+  return {
+    opened: true,
+    message: "Verification browser opened. Complete Perchance/Cloudflare verification there, then retry generation."
+  };
+}
+
+async function closeVerificationBrowser() {
+  if (verificationBrowser) {
+    await verificationBrowser.close().catch((error) => logger.warn(`Verification browser close failed: ${error.message}`));
+  }
+  verificationBrowser = null;
+  verificationPage = null;
+}
+
+async function getVerificationStatus() {
+  let userKey = cachedUserKey || config.perchance.userKey;
+
+  if (!userKey && verificationPage && !verificationPage.isClosed()) {
+    try {
+      userKey = await readUserKeyFromVerifyPage(verificationPage);
+      if (userKey) cachedUserKey = userKey;
+    } catch (error) {
+      logger.warn(`Could not read verification status: ${error.message}`);
+    }
+  }
+
+  return {
+    verified: Boolean(userKey),
+    headless: config.perchance.headless,
+    browserOpen: Boolean(verificationPage && !verificationPage.isClosed())
+  };
+}
+
 async function getUserKey({ forceRefresh = false } = {}) {
   if (!forceRefresh) {
     if (cachedUserKey && (await verifyUserKey(cachedUserKey))) {
@@ -178,18 +236,26 @@ async function generateWithPuppeteer({ prompt, negativePrompt, style, resolution
   logger.info("Generating image through Puppeteer browser workflow");
 
   let browser;
+  let page;
+  let shouldCloseBrowser = true;
 
   try {
-    browser = await launchBrowser();
-    const page = await browser.newPage();
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-    );
+    if (verificationBrowser && verificationPage && !verificationPage.isClosed()) {
+      browser = verificationBrowser;
+      page = verificationPage;
+      shouldCloseBrowser = false;
+    } else {
+      browser = await launchBrowser();
+      page = await browser.newPage();
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+      );
+    }
 
     const userKey = cachedUserKey || config.perchance.userKey || (await readUserKeyFromVerifyPage(page));
     if (!userKey) {
       throw makeError(
-        "Perchance requires browser verification before generation. Set PERCHANCE_HEADLESS=false, start the backend, pass verification in the opened browser, then retry.",
+        "Perchance requires browser verification before generation. Open http://localhost:3001/verify, pass verification in the opened browser, then retry.",
         502
       );
     }
@@ -262,7 +328,7 @@ async function generateWithPuppeteer({ prompt, negativePrompt, style, resolution
 
     return Buffer.from(imageBase64, "base64");
   } finally {
-    if (browser) {
+    if (browser && shouldCloseBrowser) {
       await browser.close().catch((error) => logger.warn(`Browser close failed: ${error.message}`));
     }
   }
@@ -366,4 +432,4 @@ async function generateImage(options) {
   }
 }
 
-module.exports = { generateImage };
+module.exports = { closeVerificationBrowser, generateImage, getVerificationStatus, openVerificationBrowser };
