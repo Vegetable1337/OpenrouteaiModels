@@ -21,6 +21,53 @@ function Test-Command {
   return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Invoke-Checked {
+  param(
+    [string]$FilePath,
+    [string[]]$Arguments
+  )
+
+  & $FilePath @Arguments
+  if ($LASTEXITCODE -ne 0) {
+    throw "$FilePath $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+  }
+}
+
+function Install-NodeDependencies {
+  param([string]$ProjectPath)
+
+  Push-Location $ProjectPath
+  try {
+    if (Test-Path "node_modules") {
+      Invoke-Checked "npm.cmd" @("install")
+    } elseif (Test-Path "package-lock.json") {
+      Invoke-Checked "npm.cmd" @("ci")
+    } else {
+      Invoke-Checked "npm.cmd" @("install")
+    }
+  } finally {
+    Pop-Location
+  }
+}
+
+function Stop-ProjectNodeProcesses {
+  param([string]$ProjectPath)
+
+  $resolvedProjectPath = (Resolve-Path $ProjectPath).Path
+  $currentPid = $PID
+  $nodeProcesses = Get-CimInstance Win32_Process -Filter "name = 'node.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.ProcessId -ne $currentPid -and
+      $_.CommandLine -and
+      $_.CommandLine.IndexOf($resolvedProjectPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    }
+
+  foreach ($process in $nodeProcesses) {
+    Write-Warn "Stopping old Node process $($process.ProcessId) using this project"
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Wait-Http {
   param(
     [string]$Url,
@@ -121,12 +168,12 @@ if ($envText -match "OPENROUTER_API_KEY=sk-or-v1-your-key-here" -or $envText -ma
   Write-Ok "OpenRouter API key is configured"
 }
 
+Write-Step "Stopping old project Node processes"
+Stop-ProjectNodeProcesses $Root
+Write-Ok "Old project Node processes stopped"
+
 Write-Step "Installing frontend dependencies"
-if (Test-Path "package-lock.json") {
-  npm.cmd ci
-} else {
-  npm.cmd install
-}
+Install-NodeDependencies $Root
 Write-Ok "Frontend dependencies are ready"
 
 Write-Step "Preparing Perchance image backend"
@@ -141,11 +188,7 @@ if (Test-Path $perchanceRoot) {
       Write-Ok "Perchance .env already exists"
     }
 
-    if (Test-Path "package-lock.json") {
-      npm.cmd ci
-    } else {
-      npm.cmd install
-    }
+    Install-NodeDependencies $perchanceRoot
     Write-Ok "Perchance dependencies are ready"
   } finally {
     Pop-Location
