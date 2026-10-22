@@ -155,6 +155,10 @@ app/
   models.py    Pydantic request/response models
 ```
 
+### Лицензия
+
+Этот проект распространяется по лицензии [MIT](LICENSE). Copyright (c) 2026 Vegetable1337.
+
 ## English
 
 ### What This Project Is
@@ -297,3 +301,7 @@ app/
   prompts.py   system/context prompt builders
   models.py    Pydantic request/response models
 ```
+
+### License
+
+This project is licensed under the [MIT License](LICENSE). Copyright (c) 2026 Vegetable1337.
